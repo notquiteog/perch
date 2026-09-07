@@ -8,3 +8,7 @@ deploy/generated/
 .DS_Store
 dist-test/
 *.tsbuildinfo
+
+# Until `gh auth refresh -s workflow` is run, pushing this is rejected.
+# Remove this line once the scope is granted, then commit it.
+.github/workflows/
