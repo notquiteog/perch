@@ -49,7 +49,9 @@ Options:
   --bind <ip>                address to bind, if you would rather choose it
   --network <name>           Tern's podman network (default: detected)
   --host-tern                Tern runs on the host, not in a container
-  --uninstall                remove the account, its key and the sshd drop-in
+  --uninstall                remove everything: the account, its keys and the
+                             sshd drop-in. With --key, removes only that key
+                             and leaves the account if others remain.
 USAGE
 }
 
@@ -81,14 +83,62 @@ note() { printf '  %s%s%s\n' "$D" "$*" "$N"; }
 SSHD_DROPIN="/etc/ssh/sshd_config.d/50-perch.conf"
 
 # ---------- uninstall ----------
+#
+# Two modes, and the difference matters when more than one machine uses this
+# server.
+#
+#   --uninstall --key "…"   take out just that key. The account and the sshd
+#                           drop-in stay unless it was the last key, so
+#                           retiring one perch does not cut off another.
+#   --uninstall             take out everything: account, keys, drop-in.
+#
+# Both are safe to run twice: nothing here fails because it has already been
+# done.
 if [ "$UNINSTALL" = 1 ]; then
+  HOME_DIR="$(getent passwd "$TUNNEL_USER" 2>/dev/null | cut -d: -f6 || true)"
+  AUTH_FILE="${HOME_DIR:+$HOME_DIR/.ssh/authorized_keys}"
+
+  if [ -n "$PUBKEY" ]; then
+    step "Removing one key from $TUNNEL_USER"
+    if [ -z "$HOME_DIR" ] || [ ! -f "$AUTH_FILE" ]; then
+      ok "nothing to remove: no $TUNNEL_USER account with authorized keys here"
+      exit 0
+    fi
+    KEY_BODY="$(printf '%s' "$PUBKEY" | awk '{print $2}')"
+    if [ -z "$KEY_BODY" ]; then die "that does not look like an SSH public key."; fi
+    if grep -qF "$KEY_BODY" "$AUTH_FILE" 2>/dev/null; then
+      grep -vF "$KEY_BODY" "$AUTH_FILE" > "$AUTH_FILE.new" || true
+      mv "$AUTH_FILE.new" "$AUTH_FILE"
+      chown "$TUNNEL_USER:$TUNNEL_USER" "$AUTH_FILE" 2>/dev/null || true
+      chmod 600 "$AUTH_FILE"
+      ok "removed that key"
+    else
+      ok "that key was not present; nothing to do"
+    fi
+    # Any live session still holding the forward belongs to a tunnel whose key
+    # has just been revoked, so it will not come back.
+    pkill -u "$TUNNEL_USER" -f 'sshd' >/dev/null 2>&1 || true
+    if [ -s "$AUTH_FILE" ]; then
+      REMAINING=$(grep -cvE '^\s*(#|$)' "$AUTH_FILE" || true)
+      note "$REMAINING key(s) still authorised; leaving the account in place"
+      exit 0
+    fi
+    note "that was the last key"
+  fi
+
   step "Removing the perch tunnel account and configuration"
   rm -f "$SSHD_DROPIN" && ok "removed $SSHD_DROPIN"
   if id "$TUNNEL_USER" >/dev/null 2>&1; then
+    pkill -u "$TUNNEL_USER" >/dev/null 2>&1 || true
     userdel -r "$TUNNEL_USER" 2>/dev/null || userdel "$TUNNEL_USER" 2>/dev/null || true
     ok "removed the $TUNNEL_USER account"
+  else
+    ok "no $TUNNEL_USER account to remove"
   fi
-  if sshd -t 2>/dev/null; then systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true; ok "sshd reloaded"; fi
+  if sshd -t 2>/dev/null; then
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+    ok "sshd reloaded"
+  fi
   exit 0
 fi
 

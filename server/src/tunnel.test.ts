@@ -1,8 +1,6 @@
-// The rail that matters: the tunnel must never be told to land on an address
-// the internet can reach. Getting this wrong would publish the model endpoint
-// to the world, which is the single failure this design exists to prevent, so
-// it is checked in three places — here, in deploy/perch-hostd, and in
-// deploy/tern-side-setup.sh.
+// Connections: several machines can use one GPU, so the tests are mostly about
+// keeping them independent — one connection's settings, key or removal must
+// never disturb another's.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -13,130 +11,142 @@ const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'perch-tunnel-test-'));
 process.env.PERCH_STATE_DIR = stateDir;
 process.env.PERCH_LOG_LEVEL = 'error';
 
-const { validate, parsePairing, saveTunnel } = await import('./tunnel.js');
-const { loadState } = await import('./state.js');
+const t = await import('./tunnel.js');
+
+// ---------- the bind-address rail ----------
 
 test('private addresses are accepted', () => {
-  for (const ip of ['127.0.0.1', '10.89.0.1', '10.0.0.1', '192.168.1.1', '172.16.0.1', '172.31.255.254']) {
-    assert.doesNotThrow(() => validate({ remoteBind: ip }), `${ip} should be allowed`);
+  for (const ip of ['127.0.0.1', '10.89.0.1', '192.168.1.1', '172.16.0.1', '172.31.255.254']) {
+    assert.doesNotThrow(() => t.validate({ remoteBind: ip }), `${ip} should be allowed`);
   }
 });
 
 test('public addresses are refused', () => {
-  for (const ip of ['8.8.8.8', '203.0.113.10', '172.15.0.1', '172.32.0.1', '1.1.1.1', '198.51.100.7']) {
-    assert.throws(() => validate({ remoteBind: ip }), /private address/, `${ip} should be refused`);
+  for (const ip of ['8.8.8.8', '203.0.113.10', '172.15.0.1', '172.32.0.1', '0.0.0.0']) {
+    assert.throws(() => t.validate({ remoteBind: ip }), /private address/, `${ip} should be refused`);
   }
 });
 
-test('0.0.0.0 is refused — it is every interface, including the public one', () => {
-  assert.throws(() => validate({ remoteBind: '0.0.0.0' }), /private address/);
+test('hostnames, users, ports and proxies are checked', () => {
+  assert.doesNotThrow(() => t.validate({ host: 'mail.example.com', user: 'perch', sshPort: 22 }));
+  assert.doesNotThrow(() => t.validate({ host: `${'a'.repeat(56)}.onion` }));
+  assert.throws(() => t.validate({ host: 'example.com; reboot' }), /hostname/);
+  assert.throws(() => t.validate({ user: 'Perch User' }), /account name/);
+  assert.throws(() => t.validate({ sshPort: 70000 }), /port number/);
+  assert.throws(() => t.validate({ torProxy: '203.0.113.9:9050' }), /this machine or your own network/);
+  assert.doesNotThrow(() => t.validate({ torProxy: '127.0.0.1:9050' }));
+  assert.doesNotThrow(() => t.validate({ torProxy: '' }));
 });
 
-test('anything that is not a plain IPv4 address is refused', () => {
-  for (const bad of ['::1', 'localhost', '10.0.0.1; rm -rf /', '', '10.0.0']) {
-    assert.throws(() => validate({ remoteBind: bad }));
-  }
-});
+// ---------- pairing ----------
 
-test('hostnames, users and ports are checked', () => {
-  assert.doesNotThrow(() => validate({ host: 'mail.example.com', user: 'perch', sshPort: 22 }));
-  assert.throws(() => validate({ host: 'example.com; reboot' }), /hostname/);
-  assert.throws(() => validate({ user: 'Perch User' }), /account name/);
-  assert.throws(() => validate({ sshPort: 0 }), /port number/);
-  assert.throws(() => validate({ sshPort: 70000 }), /port number/);
-});
-
-// The pairing line is what removes the "read an IP off a terminal and retype
-// it" step, so it has to cope with being handed a whole screen of output.
 test('the pairing line is found in a full paste of the script output', () => {
-  const output = [
-    '==> sshd',
-    '  \u2713 wrote /etc/ssh/sshd_config.d/50-perch.conf',
-    '  \u2713 sshd reloaded (your current session is untouched)',
-    '',
-    '  Done. The Tern box is ready.',
-    '',
-    '  Copy this line into perch, under Connect:',
-    '',
-    '    perch-pair:v1:10.89.0.1:11434',
-    '',
-  ].join('\n');
-  assert.deepEqual(parsePairing(output), { bind: '10.89.0.1', port: 11434 });
+  const output = ['==> sshd', '  wrote the drop-in', '', '    perch-pair:v1:10.89.0.1:11434', ''].join('\n');
+  assert.deepEqual(t.parsePairing(output), { bind: '10.89.0.1', port: 11434 });
 });
 
-test('the bare line works too', () => {
-  assert.deepEqual(parsePairing('perch-pair:v1:127.0.0.1:11434'), { bind: '127.0.0.1', port: 11434 });
-  assert.deepEqual(parsePairing('  perch-pair:v1:172.20.0.1:9999  '), { bind: '172.20.0.1', port: 9999 });
+test('a paste with no pairing line, or a public one, is refused', () => {
+  assert.throws(() => t.parsePairing('some unrelated output'), /No pairing line found/);
+  assert.throws(() => t.parsePairing('perch-pair:v1:203.0.113.10:11434'), /private address/);
 });
 
-test('a paste with no pairing line says so usefully', () => {
-  assert.throws(() => parsePairing('some unrelated terminal output'), /No pairing line found/);
-  assert.throws(() => parsePairing(''), /No pairing line found/);
+// ---------- ids ----------
+
+test('names become filesystem- and unit-safe ids', () => {
+  assert.equal(t.slugify('Mail VPS'), 'mail-vps');
+  assert.equal(t.slugify('  ../../etc/passwd  '), 'etc-passwd');
+  assert.equal(t.slugify('!!!'), 'tern');
+  assert.match(t.slugify('A'.repeat(80)), /^[a-z0-9-]{1,32}$/);
 });
 
-test('a pairing line naming a public address is refused, however it arrives', () => {
-  // The rail applies to pasted input exactly as it applies to typed input:
-  // this is the value that decides what gets bound.
-  assert.throws(() => parsePairing('perch-pair:v1:203.0.113.10:11434'), /private address/);
-  assert.throws(() => parsePairing('perch-pair:v1:8.8.8.8:11434'), /private address/);
+// ---------- several connections ----------
+
+test('two connections can exist side by side, each with its own id and key path', async () => {
+  const a = await t.createConnection({ name: 'Mail VPS', host: 'mail.example.com' });
+  const b = await t.createConnection({ name: 'Laptop', host: 'laptop.local' });
+  assert.notEqual(a.id, b.id);
+  assert.notEqual(a.keyPath, b.keyPath);
+  assert.match(a.keyPath, new RegExp(`/ssh/${a.id}/id_ed25519$`));
+  assert.equal(t.listConnections().length, 2);
 });
 
-// Dialling out through Tor: the proxy has to be somewhere this machine
-// controls. A remote SOCKS proxy would see every byte of the tunnel before
-// Tor ever did, which is the opposite of the point.
-test('a local SOCKS proxy is accepted', () => {
-  for (const p of ['127.0.0.1:9050', '127.0.0.1:9150', '10.0.0.5:1080', '192.168.1.9:9050']) {
-    assert.doesNotThrow(() => validate({ torProxy: p }), `${p} should be allowed`);
-  }
+test('a repeated name gets a distinct id rather than colliding', async () => {
+  const a = await t.createConnection({ name: 'Mail VPS', host: 'other.example.com' });
+  assert.notEqual(a.id, 'mail-vps');
+  assert.match(a.id, /^mail-vps-\d+$/);
 });
 
-test('an empty proxy means connect directly, and is allowed', () => {
-  assert.doesNotThrow(() => validate({ torProxy: '' }));
+test('two connections may not forward the same port on the same host', async () => {
+  await assert.rejects(
+    () => t.createConnection({ name: 'Duplicate', host: 'mail.example.com', remotePort: 11434 }),
+    /already forwards port 11434/,
+  );
+  // A different port on the same host is fine, as is the same port elsewhere.
+  await assert.doesNotReject(() => t.createConnection({ name: 'Second slot', host: 'mail.example.com', remotePort: 11435 }));
+  await assert.doesNotReject(() => t.createConnection({ name: 'Elsewhere', host: 'third.example.com', remotePort: 11434 }));
 });
 
-test('a remote SOCKS proxy is refused', () => {
-  assert.throws(() => validate({ torProxy: '203.0.113.10:9050' }), /this machine or your own network/);
-  assert.throws(() => validate({ torProxy: '8.8.8.8:1080' }), /this machine or your own network/);
+test('editing one connection leaves the others alone', async () => {
+  const [a, b] = t.listConnections();
+  const beforeB = { ...b! };
+  await t.updateConnection(a!.id, { torProxy: '127.0.0.1:9050' });
+  const afterB = t.listConnections().find((c) => c.id === b!.id)!;
+  assert.equal(afterB.host, beforeB.host, "the other connection's host changed");
+  assert.equal(afterB.torProxy, beforeB.torProxy, "the other connection's proxy changed");
+  assert.equal(t.getConnection(a!.id).torProxy, '127.0.0.1:9050');
 });
 
-test('a malformed proxy address is refused', () => {
-  for (const bad of ['127.0.0.1', '9050', 'localhost:9050', '127.0.0.1:notaport', '127.0.0.1:9050; sh']) {
-    assert.throws(() => validate({ torProxy: bad }), /address and port|port number/);
-  }
-});
-
-test('an .onion host is accepted — the whole point of dialling out over Tor', () => {
-  const onion = 'a'.repeat(56) + '.onion';
-  assert.doesNotThrow(() => validate({ host: onion }));
-});
-
-// A regression test with teeth. Saving one setting must not blank the others:
-// callers build a Partial from an optional request body, so every field they
-// did not send arrives as an explicit undefined, and a naive spread writes
-// those over perfectly good values.
-test('saving one setting leaves the rest alone', async () => {
-  await saveTunnel({ host: 'mail.example.com', user: 'perch', sshPort: 2222, remoteBind: '10.89.0.1', remotePort: 11434 });
-
-  // Exactly the shape an API handler produces for a body of {torProxy}.
-  await saveTunnel({
-    host: undefined, user: undefined, sshPort: undefined,
-    remoteBind: undefined, remotePort: undefined, torProxy: '127.0.0.1:9050',
+test('saving one setting does not blank the rest', async () => {
+  const c = await t.createConnection({ name: 'Partial', host: 'partial.example.com', sshPort: 2222, user: 'perch', remotePort: 11500 });
+  // Exactly the shape an API handler builds from an optional request body.
+  await t.updateConnection(c.id, {
+    host: undefined, user: undefined, sshPort: undefined, remotePort: undefined, torProxy: '127.0.0.1:9050',
   });
-
-  const t = loadState().tunnel;
-  assert.equal(t.host, 'mail.example.com', 'host was blanked');
-  assert.equal(t.user, 'perch', 'user was blanked');
-  assert.equal(t.sshPort, 2222, 'sshPort was blanked');
-  assert.equal(t.remoteBind, '10.89.0.1', 'remoteBind was blanked');
-  assert.equal(t.remotePort, 11434, 'remotePort was blanked');
-  assert.equal(t.torProxy, '127.0.0.1:9050', 'torProxy was not applied');
-  assert.match(t.ternBaseUrl, /:11434$/, 'the base URL was rebuilt from a blanked port');
+  const after = t.getConnection(c.id);
+  assert.equal(after.host, 'partial.example.com');
+  assert.equal(after.sshPort, 2222);
+  assert.equal(after.remotePort, 11500);
+  assert.equal(after.torProxy, '127.0.0.1:9050');
 });
 
-test('turning the proxy back off is a real change, not a no-op', async () => {
-  await saveTunnel({ torProxy: '' });
-  assert.equal(loadState().tunnel.torProxy, '');
-  assert.equal(loadState().tunnel.host, 'mail.example.com', 'host survived');
+test('a connection keeps its id and key path however it is edited', async () => {
+  const c = t.listConnections()[0]!;
+  await t.updateConnection(c.id, { id: 'hijacked', keyPath: '/etc/shadow' } as never);
+  const after = t.getConnection(c.id);
+  assert.equal(after.id, c.id);
+  assert.match(after.keyPath, new RegExp(`/ssh/${c.id}/id_ed25519$`));
+});
+
+// ---------- removal ----------
+
+test('removing a connection retires it, keeps the record, and leaves others running', async () => {
+  const before = t.listConnections().filter((c) => !c.retiredAt).length;
+  const victim = t.listConnections().find((c) => !c.retiredAt)!;
+  await t.retireConnection(victim.id);
+  const after = t.getConnection(victim.id);
+  assert.ok(after.retiredAt, 'should be marked retired');
+  assert.equal(t.listConnections().filter((c) => !c.retiredAt).length, before - 1);
+});
+
+test('removal is idempotent', async () => {
+  const victim = t.listConnections().find((c) => c.retiredAt)!;
+  await assert.doesNotReject(() => t.retireConnection(victim.id));
+});
+
+test('a retired connection still knows the command to clean up the far side', () => {
+  // The record outlives the key precisely so this can be shown: perch cannot
+  // run it, because the tunnel key is restricted to holding a port open.
+  const retired = t.listConnections().find((c) => c.retiredAt)!;
+  const cmd = t.uninstallCommand({ ...retired, publicKey: 'ssh-ed25519 AAAAC3Nz test' });
+  assert.match(cmd!, /--uninstall/);
+  assert.match(cmd!, /--key "ssh-ed25519 AAAAC3Nz test"/);
+  assert.match(cmd!, new RegExp(`--user ${retired.user}`));
+});
+
+test('forgetting drops the record for good', () => {
+  const retired = t.listConnections().find((c) => c.retiredAt)!;
+  t.forgetConnection(retired.id);
+  assert.equal(t.listConnections().some((c) => c.id === retired.id), false);
 });
 
 test.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));

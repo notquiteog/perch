@@ -144,13 +144,11 @@ export default function System() {
           hint="A home machine reboots for updates and after power cuts. Without this, Tern quietly has no model until somebody notices and starts it by hand."
           onChange={(v) => void run('boot', () => api.boot(v ? 'enable' : 'disable'), v ? 'perch will start at boot.' : 'perch will not start at boot.')}
         />
-        <Toggle
-          checked={overview.tunnel.enabled === 'enabled'}
-          disabled={!hostUp || busy !== null}
-          label="Start the tunnel when this machine boots"
-          hint="The other half. Containers running with no tunnel looks identical to a broken model from Tern's side."
-          onChange={(v) => void run('tunnelboot', () => api.tunnelAction(v ? 'enable' : 'disable'), v ? 'The tunnel will start at boot.' : 'The tunnel will not start at boot.')}
-        />
+        <p className="sub" style={{ marginTop: 12, marginBottom: 0 }}>
+          Each connection starts at boot on its own — that switch lives beside the connection,
+          under Connect. Containers running with no tunnel looks identical to a broken model
+          from Tern&apos;s side, so it is worth having both on.
+        </p>
       </Card>
 
       <Card title="Ollama tuning" sub="Written into .env. Ollama reads them at startup, so restart the containers afterwards.">

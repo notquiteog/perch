@@ -344,3 +344,60 @@ Check it is actually going over Tor:
 ./bin/perch tunnel status
 systemctl cat perch-tunnel.service | grep -i proxycommand
 ```
+
+
+---
+
+## More than one Tern
+
+A GPU is worth sharing. perch holds a connection per machine, and they are
+independent all the way down: each has its own account on the far side, its own
+key, its own config file and its own systemd unit
+(`perch-tunnel-<id>.service`). Nothing is shared but the model endpoint they
+all forward to, which is the point.
+
+Add one with **Connect → Add a connection**. The only rule perch enforces is
+that two connections cannot ask for the same port on the same host: the second
+would fail to bind, and with `ExitOnForwardFailure` it would restart for ever
+without either working. Give one of them a different port over there instead.
+
+### Removing one
+
+Pressing **Remove** deletes, on this machine:
+
+- the systemd unit, stopped and disabled first;
+- that connection's key, so it is not left lying around for a machine perch no
+  longer talks to;
+- its configuration file.
+
+It does **not** touch the far side, and it cannot. The tunnel key is installed
+over there with `command="/usr/sbin/nologin"` so that it can hold one port open
+and do nothing else — that restriction is most of what makes this design safe,
+and cleaning up remotely would mean keeping a credential here that could also
+run anything on your mail server. Trading that away to save one paste is a bad
+bargain.
+
+So the connection stays in the console, without its key or its unit, showing
+the command to run over there:
+
+```bash
+curl -fsSL .../tern-side-setup.sh | sudo bash -s -- --uninstall \
+  --key "ssh-ed25519 AAAA… perch-mail-vps@yourbox" \
+  --user perch
+```
+
+That is **scoped to this connection's key**. It removes that one line from
+`authorized_keys`, and removes the account and the sshd drop-in only if no
+other key is left — so a second perch box using the same server keeps working.
+Running it twice is harmless: it reports that the key was already gone and
+stops.
+
+Once it is done, press **Done — forget it** and the record goes.
+
+### Upgrading from a single tunnel
+
+An install from before connections were separate had one `perch-tunnel.service`
+and one key at `ssh/id_ed25519`. Both are adopted: the state file's single
+tunnel becomes a connection with the id `default`, the helper moves the old key
+into `ssh/default/`, and the old unit is disabled and deleted once its
+replacement is written. Nothing needs re-pairing.

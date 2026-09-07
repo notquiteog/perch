@@ -31,9 +31,23 @@ export interface ModelChoice {
 export interface Sizing { basis: 'vram' | 'ram'; usableBytes: number; recommended: ModelChoice; fits: ModelChoice[]; numCtx: number }
 export interface Throughput { current: number; last: number; average: number; ttftMs: number | null; generations: number; totalTokens: number }
 
-export interface TunnelState {
-  configured: boolean; hasKey: boolean;
-  active: string; enabled: string; since: string; endpointUp: boolean;
+export interface ConnectionStatus {
+  id: string; configured: boolean; hasKey: boolean;
+  active: string; enabled: string; since: string; retired: boolean;
+}
+
+/** One SSH connection to one machine running Tern. */
+export interface Connection {
+  id: string; name: string;
+  host: string; user: string; sshPort: number;
+  remoteBind: string; remotePort: number;
+  torProxy: string;
+  keyPath: string; publicKey: string;
+  createdAt: string; configuredAt: string | null; retiredAt: string | null;
+  status: ConnectionStatus;
+  ternBaseUrl: string; ternBaseUrlLiteral: string;
+  setupCommand: string | null; setupManual: string;
+  uninstallCommand: string | null; sshCommand: string;
 }
 
 export interface Overview {
@@ -43,8 +57,9 @@ export interface Overview {
   modelCount: number; modelBytes: number;
   host: HostStatus | null; hostPresent: boolean; hostStale: boolean;
   sizing: Sizing;
-  tunnel: TunnelState;
-  tern: { baseUrl: string; baseUrlLiteral: string; model: string };
+  connections: Array<Connection & { status: ConnectionStatus; ternBaseUrl: string }>;
+  endpointUp: boolean;
+  tern: { model: string };
   settings: { allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean };
   tokens: number;
   activity: { total: number; errors: number; lastAt: string | null };
@@ -66,23 +81,6 @@ export interface TokenRecord {
   id: string; name: string; prefix: string;
   scopes: Array<'use' | 'manage'>;
   createdAt: string; lastUsedAt: string | null; lastUsedIp: string | null; revokedAt: string | null;
-}
-
-export interface TunnelConfig {
-  host: string; user: string; sshPort: number;
-  remoteBind: string; remotePort: number;
-  /** SOCKS5 proxy to dial out through, as host:port. Empty means direct. */
-  torProxy: string;
-  keyPath: string; publicKey: string; ternBaseUrl: string; configuredAt: string | null;
-}
-
-export interface TunnelPage {
-  config: TunnelConfig;
-  status: TunnelState;
-  publicKey: string | null;
-  ternBaseUrl: string; ternBaseUrlLiteral: string;
-  setupCommand: string | null; setupManual: string; sshCommand: string;
-  localPort: number;
 }
 
 export class ApiError extends Error {
@@ -127,18 +125,22 @@ export const api = {
   revokeToken: (id: string) => request<{ ok: true }>(`/api/tokens/${id}/revoke`, { method: 'POST' }),
   deleteToken: (id: string) => request<{ ok: true }>(`/api/tokens/${id}`, { method: 'DELETE' }),
 
-  tunnel: () => request<TunnelPage>('/api/tunnel'),
-  saveTunnel: (body: Partial<TunnelConfig>) => request<{ config: TunnelConfig; applied: { ok: boolean; output: string } }>('/api/tunnel', { method: 'PUT', body: JSON.stringify(body) }),
-  generateKey: () => request<{ publicKey: string }>('/api/tunnel/key', { method: 'POST' }),
-  pairTunnel: (text: string) => request<{
-    config: TunnelConfig;
-    baseUrl: string; baseUrlLiteral: string;
-    token: string | null; hasExistingToken: boolean;
-    status: TunnelState;
+  connections: () => request<{ connections: Connection[]; endpointUp: boolean; localPort: number }>('/api/connections'),
+  createConnection: (body: { name: string; host: string; sshPort?: number; user?: string; remotePort?: number; torProxy?: string }) =>
+    request<{ connection: Connection }>('/api/connections', { method: 'POST', body: JSON.stringify(body) }),
+  updateConnection: (id: string, body: Partial<Connection>) =>
+    request<{ connection: Connection; applied: { ok: boolean; output: string } }>(`/api/connections/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  connectionKey: (id: string) => request<{ publicKey: string }>(`/api/connections/${id}/key`, { method: 'POST' }),
+  pairConnection: (id: string, text: string) => request<{
+    connection: Connection; token: string | null; hasExistingToken: boolean;
     steps: Record<string, { ok: boolean; output: string }>;
-  }>('/api/tunnel/pair', { method: 'POST', body: JSON.stringify({ text }) }),
-  tunnelAction: (action: 'start' | 'stop' | 'restart' | 'enable' | 'disable' | 'logs') =>
-    request<{ ok: boolean; output: string }>(`/api/tunnel/${action}`, { method: 'POST' }),
+  }>(`/api/connections/${id}/pair`, { method: 'POST', body: JSON.stringify({ text }) }),
+  connectionAction: (id: string, action: 'start' | 'stop' | 'restart' | 'enable' | 'disable' | 'logs') =>
+    request<{ ok: boolean; output: string }>(`/api/connections/${id}/${action}`, { method: 'POST' }),
+  removeConnection: (id: string) => request<{
+    connection: Connection; teardown: { ok: boolean; output: string }; uninstallCommand: string | null;
+  }>(`/api/connections/${id}`, { method: 'DELETE' }),
+  forgetConnection: (id: string) => request<{ ok: true }>(`/api/connections/${id}/forget`, { method: 'POST' }),
 
   containerAction: (action: 'start' | 'stop' | 'restart' | 'pull', service?: 'perch' | 'ollama') =>
     request<{ ok: boolean; output: string }>(`/api/containers/${action}`, { method: 'POST', body: JSON.stringify({ service }) }),

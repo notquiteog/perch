@@ -44,11 +44,12 @@ is rebuilt or restarted unless it changed.
 
 ## Then the tunnel
 
-Open `http://127.0.0.1:8099` and go to **Connect**.
+Open `http://127.0.0.1:8099` and go to **Connect**, and press
+**Add a connection**. You can add as many as you have machines running Tern.
 
-1. **Generate a key.** It never leaves this machine.
-2. **Type the SSH host** of the box Tern runs on. That is the only thing you
-   need to know.
+1. **Name it and give the SSH host** of the box Tern runs on. That is the only
+   thing you need to know; a key is generated for that connection alone.
+2. **Open the connection** to see its setup steps.
 3. **Run the one command it shows you** on that box. It creates a locked-down
    account, installs the key with restrictions, teaches sshd to reap dead
    tunnels, and prints one line.
@@ -89,7 +90,8 @@ that can start and stop everything.
 ./bin/perch models          # what is installed, what is loaded
 ./bin/perch pull-model qwen3.5:9b
 ./bin/perch token "second laptop"
-./bin/perch tunnel restart
+./bin/perch connections     # what exists, and whether each is up
+./bin/perch tunnel restart mail-vps
 ./bin/perch boot on
 ./bin/perch update
 ```

@@ -40,9 +40,10 @@ appear token by token.
 - **Models** — download with a progress bar, delete, load and unload, see what
   is resident and how much of it is on the GPU, and a short list of models
   worth using for email with a note on what each is actually like.
-- **Connect** — the whole tunnel setup: a key, the SSH host, one command to run
-  on the Tern box, and one line pasted back. Ends with the base URL and API key
-  for Tern.
+- **Connect** — one entry per machine running Tern, added with a button. Each
+  gets its own account over there, its own key and its own service here, so
+  removing one leaves the others alone. Setup per connection is: a key, one
+  command to run on that box, and one line pasted back.
 - **System** — start, stop and restart the containers, turn on starting at
   boot, tune Ollama's memory settings, read logs.
 - **Activity** — what came through the endpoint, so that when Tern says the
@@ -56,6 +57,14 @@ the VPS needs no public SSH port at all. perch adjusts the timeouts to suit,
 which matters more than it sounds: the default 15-second connect timeout is not
 long enough to reach a hidden service, and the result is a tunnel that retries
 forever without ever connecting. See [docs/REMOTE.md](docs/REMOTE.md#over-tor).
+
+**As many connections as you have machines.** A VPS's Tern and a laptop's Tern
+can share one GPU. Two connections to the same host may not claim the same port
+there, which perch refuses rather than letting them fight over it. Removing one
+deletes its service, its key and its settings here, and hands you a
+key-scoped, idempotent command for the far side — perch cannot run that
+itself, because the tunnel key is deliberately restricted to holding a port
+open and nothing else.
 
 **A tunnel that stays up.** systemd owns it, with `ExitOnForwardFailure` so a
 half-open forward is retried rather than sat on, keepalives so a dead home

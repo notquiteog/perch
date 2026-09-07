@@ -45,7 +45,8 @@ export interface HostStatus {
   disk: { path: string; totalKb: number | null; usedKb: number | null; availableKb: number | null; usedPct: number | null };
   containers: Array<{ name: string; status: string; startedAt: string }>;
   boot: UnitState;
-  tunnel: UnitState;
+  /** One entry per perch-tunnel-*.service the helper can see. */
+  tunnels: UnitState[];
   hostd: { version: string; interval: number };
 }
 
@@ -68,7 +69,7 @@ export type HostAction =
   | 'containers.start' | 'containers.stop' | 'containers.restart' | 'containers.pull'
   | 'boot.enable' | 'boot.disable'
   | 'tunnel.start' | 'tunnel.stop' | 'tunnel.restart' | 'tunnel.enable' | 'tunnel.disable'
-  | 'tunnel.logs' | 'tunnel.keygen' | 'tunnel.configure'
+  | 'tunnel.logs' | 'tunnel.keygen' | 'tunnel.configure' | 'tunnel.remove'
   | 'logs' | 'env.set' | 'daemon.reload';
 
 export interface HostResult { ok: boolean; code: number; output: string }

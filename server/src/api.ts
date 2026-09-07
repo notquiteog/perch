@@ -194,12 +194,12 @@ export function buildApi(): Router {
       hostPresent: hostInfo.present,
       hostStale: hostInfo.stale,
       sizing: sizing(),
-      tunnel: await tunnel.tunnelStatus(),
-      tern: {
-        baseUrl: tunnel.ternBaseUrl(s.tunnel),
-        baseUrlLiteral: tunnel.ternBaseUrlLiteral(s.tunnel),
-        model: loaded[0]?.name || sizing().recommended.name,
-      },
+      connections: s.connections.map((c) => ({
+        ...c,
+        status: tunnel.statusOf(c),
+        ternBaseUrl: tunnel.ternBaseUrl(c),
+      })),
+      endpointUp: await tunnel.localEndpointUp(),
       settings: s.settings,
       tokens: s.tokens.filter((t) => !t.revokedAt).length,
       activity: summary(),
@@ -337,103 +337,145 @@ export function buildApi(): Router {
     sendJson(ctx.res, 200, { ok: true });
   });
 
-  // ---------- the tunnel ----------
+  // ---------- connections ----------
+  //
+  // Several machines can use this one GPU, so each gets its own account on the
+  // far side, its own key and its own systemd unit. Nothing is shared, which
+  // is what makes removing one safe for the others.
 
-  r.get('/api/tunnel', async (ctx) => {
+  const shape = (c: ReturnType<typeof tunnel.getConnection>): Record<string, unknown> => ({
+    ...c,
+    status: tunnel.statusOf(c),
+    publicKey: tunnel.publicKeyOf(c),
+    ternBaseUrl: tunnel.ternBaseUrl(c),
+    ternBaseUrlLiteral: tunnel.ternBaseUrlLiteral(c),
+    setupCommand: tunnel.setupCommand(c),
+    setupManual: tunnel.setupManual(c),
+    uninstallCommand: tunnel.uninstallCommand(c),
+    sshCommand: tunnel.sshCommandPreview(c),
+  });
+
+  r.get('/api/connections', async (ctx) => {
     requireConsole(ctx);
-    const t = loadState().tunnel;
     sendJson(ctx.res, 200, {
-      config: t,
-      status: await tunnel.tunnelStatus(),
-      publicKey: tunnel.publicKey(),
-      ternBaseUrl: tunnel.ternBaseUrl(t),
-      ternBaseUrlLiteral: tunnel.ternBaseUrlLiteral(t),
-      setupCommand: tunnel.ternSetupCommand(t),
-      setupManual: tunnel.ternSetupManual(t),
-      sshCommand: tunnel.sshCommandPreview(t),
+      connections: tunnel.listConnections().map(shape),
+      endpointUp: await tunnel.localEndpointUp(),
       localPort: config.proxyPort,
     });
   });
 
-  r.put('/api/tunnel', async (ctx) => {
+  r.post('/api/connections', async (ctx) => {
     requireConsole(ctx);
-    const body = await readJson<Record<string, unknown>>(ctx.req);
-    const next = await tunnel.saveTunnel({
-      host: typeof body.host === 'string' ? body.host.trim() : undefined,
-      user: typeof body.user === 'string' ? body.user.trim() : undefined,
-      sshPort: typeof body.sshPort === 'number' ? body.sshPort : undefined,
-      remoteBind: typeof body.remoteBind === 'string' ? body.remoteBind.trim() : undefined,
-      remotePort: typeof body.remotePort === 'number' ? body.remotePort : undefined,
-      torProxy: typeof body.torProxy === 'string' ? body.torProxy.trim() : undefined,
+    const b = await readJson<Record<string, unknown>>(ctx.req);
+    const conn = await tunnel.createConnection({
+      name: typeof b.name === 'string' ? b.name.trim() : undefined,
+      host: typeof b.host === 'string' ? b.host.trim() : undefined,
+      user: typeof b.user === 'string' ? b.user.trim() : undefined,
+      sshPort: typeof b.sshPort === 'number' ? b.sshPort : undefined,
+      remotePort: typeof b.remotePort === 'number' ? b.remotePort : undefined,
+      torProxy: typeof b.torProxy === 'string' ? b.torProxy.trim() : undefined,
     });
-    // Rendering the unit needs root, so it happens on the host side.
-    const applied = await hostAction('tunnel.configure', '', 30_000).catch((e: HttpError) => ({ ok: false, output: e.message }));
-    sendJson(ctx.res, 200, { config: next, applied });
+    sendJson(ctx.res, 201, { connection: shape(conn) });
   });
 
-  // One paste, and the rest of the setup happens: save the address, rewrite
-  // the unit, start the tunnel, make a token if there is not one, and hand
-  // back the two values Tern needs. This is the step that used to be "read an
-  // IP off a terminal and retype it into five form fields".
-  r.post('/api/tunnel/pair', async (ctx) => {
+  r.get('/api/connections/:id', (ctx) => {
     requireConsole(ctx);
+    sendJson(ctx.res, 200, { connection: shape(tunnel.getConnection(ctx.params.id!)) });
+  });
+
+  r.put('/api/connections/:id', async (ctx) => {
+    requireConsole(ctx);
+    const b = await readJson<Record<string, unknown>>(ctx.req);
+    const conn = await tunnel.updateConnection(ctx.params.id!, {
+      name: typeof b.name === 'string' ? b.name.trim() : undefined,
+      host: typeof b.host === 'string' ? b.host.trim() : undefined,
+      user: typeof b.user === 'string' ? b.user.trim() : undefined,
+      sshPort: typeof b.sshPort === 'number' ? b.sshPort : undefined,
+      remoteBind: typeof b.remoteBind === 'string' ? b.remoteBind.trim() : undefined,
+      remotePort: typeof b.remotePort === 'number' ? b.remotePort : undefined,
+      torProxy: typeof b.torProxy === 'string' ? b.torProxy.trim() : undefined,
+    });
+    const applied = await hostAction('tunnel.configure', conn.id, 30_000).catch((e: HttpError) => ({ ok: false, output: e.message }));
+    sendJson(ctx.res, 200, { connection: shape(tunnel.getConnection(conn.id)), applied });
+  });
+
+  r.post('/api/connections/:id/key', async (ctx) => {
+    requireConsole(ctx);
+    sendJson(ctx.res, 200, { publicKey: await tunnel.generateKey(ctx.params.id!) });
+  });
+
+  // One paste and the rest happens: save the address, render the unit, start
+  // the tunnel, enable it at boot, and make a token if there is not one.
+  r.post('/api/connections/:id/pair', async (ctx) => {
+    requireConsole(ctx);
+    const id = ctx.params.id!;
     const body = await readJson<{ text?: string }>(ctx.req);
-    const before = loadState().tunnel;
+    const before = tunnel.getConnection(id);
     if (!before.host) throw badRequest('Say where Tern runs first — perch needs the SSH host before it can pair.');
 
     const { bind, port } = tunnel.parsePairing(body.text ?? '');
-    const config = await tunnel.saveTunnel({ remoteBind: bind, remotePort: port });
+    await tunnel.updateConnection(id, { remoteBind: bind, remotePort: port });
 
-    // Render the unit from the new settings, then bring it up. Already
-    // running means the address changed, so it is a restart rather than a
-    // start.
-    //
-    // None of these three is allowed to fail the pairing. The address has
-    // already been saved and is the hard-won part; if the helper is missing
-    // or systemd refuses, the right answer is to say which step failed and
-    // leave the rest in place, not to throw the address away and make
-    // somebody fetch it from the other machine again.
+    // None of these may fail the pairing: the address is the hard-won part,
+    // and losing it on a failed unit write would mean fetching it from the
+    // other machine again.
     const attempt = async (a: HostAction, ms: number): Promise<{ ok: boolean; output: string }> =>
-      hostAction(a, '', ms).catch((e) => ({ ok: false, output: (e as Error).message }));
+      hostAction(a, id, ms).catch((e) => ({ ok: false, output: (e as Error).message }));
 
     const configured = await attempt('tunnel.configure', 30_000);
-    const wasActive = (await tunnel.tunnelStatus()).active === 'active';
+    const wasActive = tunnel.statusOf(tunnel.getConnection(id)).active === 'active';
     const started = await attempt(wasActive ? 'tunnel.restart' : 'tunnel.start', 60_000);
-    // A tunnel that does not come back after a reboot is the most common way
-    // this quietly stops working, so it is switched on as part of pairing.
     const atBoot = await attempt('tunnel.enable', 30_000);
 
-    // Every install needs at least one token, and asking for it as a separate
-    // step is a step nobody would ever want to skip.
     const existing = loadState().tokens.filter((t) => !t.revokedAt);
-    let token: string | null = null;
-    if (existing.length === 0) {
-      token = mintToken('Tern', ['use', 'manage']).token;
-    }
+    const token = existing.length === 0 ? mintToken('Tern', ['use', 'manage']).token : null;
 
     sendJson(ctx.res, 200, {
-      config,
-      baseUrl: tunnel.ternBaseUrl(config),
-      baseUrlLiteral: tunnel.ternBaseUrlLiteral(config),
+      connection: shape(tunnel.getConnection(id)),
       token,
       hasExistingToken: existing.length > 0,
-      status: await tunnel.tunnelStatus(),
       steps: { configured, started, atBoot },
     });
   });
 
-  r.post('/api/tunnel/key', async (ctx) => {
+  /** Drop a retired record once the far side has been dealt with. */
+  r.post('/api/connections/:id/forget', (ctx) => {
     requireConsole(ctx);
-    sendJson(ctx.res, 200, { publicKey: await tunnel.generateKey() });
+    const c = tunnel.getConnection(ctx.params.id!);
+    if (!c.retiredAt) throw badRequest('Remove the connection before forgetting it.');
+    tunnel.forgetConnection(c.id);
+    sendJson(ctx.res, 200, { ok: true });
   });
 
-  r.post('/api/tunnel/:action', async (ctx) => {
+  r.post('/api/connections/:id/:action', async (ctx) => {
     requireConsole(ctx);
+    const id = ctx.params.id!;
     const a = ctx.params.action!;
-    const allowed = ['start', 'stop', 'restart', 'enable', 'disable', 'logs'];
-    if (!allowed.includes(a)) throw notFound('no such tunnel action');
-    const result = await hostAction(`tunnel.${a}` as HostAction, '', 60_000);
-    sendJson(ctx.res, 200, result);
+    if (!['start', 'stop', 'restart', 'enable', 'disable', 'logs'].includes(a)) throw notFound('no such action');
+    tunnel.getConnection(id); // 404 rather than asking the helper about nothing
+    sendJson(ctx.res, 200, await hostAction(`tunnel.${a}` as HostAction, id, 60_000));
+  });
+
+  /**
+   * Remove a connection. Everything on this machine goes: the unit is stopped
+   * and disabled, the unit file, the key and the config are deleted.
+   *
+   * The account on the far side is not touched, and cannot be. The tunnel key
+   * is restricted with command="/usr/sbin/nologin" precisely so that it cannot
+   * run anything over there — giving perch the ability to clean up remotely
+   * would mean keeping a credential here that could also do everything else.
+   * So the record survives, without its key or its unit, carrying the exact
+   * command to run on that server. It is scoped to this connection's key and
+   * safe to run twice.
+   */
+  r.delete('/api/connections/:id', async (ctx) => {
+    requireConsole(ctx);
+    const { connection, teardown } = await tunnel.retireConnection(ctx.params.id!);
+    sendJson(ctx.res, 200, {
+      connection: shape(connection),
+      teardown,
+      uninstallCommand: tunnel.uninstallCommand(connection),
+    });
   });
 
   // ---------- containers, boot, logs ----------

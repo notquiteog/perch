@@ -28,8 +28,18 @@ export interface TokenRecord {
   revokedAt: string | null;
 }
 
-export interface TunnelConfig {
-  /** The machine Tern runs on, as SSH reaches it. */
+/**
+ * One SSH connection to one machine running Tern. perch holds several: a
+ * laptop's Tern and a VPS's Tern can both use the same GPU, and each gets its
+ * own account, its own key and its own systemd unit so that removing one
+ * touches nothing belonging to another.
+ */
+export interface Connection {
+  /** Stable slug. Becomes part of a unit name and a filename, so it is checked. */
+  id: string;
+  /** What to call it in the console. */
+  name: string;
+  /** The machine Tern runs on, as SSH reaches it. May be an .onion. */
   host: string;
   /** The unprivileged account the tunnel logs into. Not your admin user. */
   user: string;
@@ -41,19 +51,25 @@ export interface TunnelConfig {
    */
   remoteBind: string;
   remotePort: number;
-  /** Path to the tunnel's private key, on this machine, outside the container. */
-  keyPath: string;
-  publicKey: string;
   /**
    * A SOCKS5 proxy to dial out through, as host:port — in practice Tor's
-   * 127.0.0.1:9050. Empty means connect directly. With this set the Tern box
-   * never learns this machine's address, and its SSH port can be an .onion
-   * that is not on the public internet at all.
+   * 127.0.0.1:9050. Empty means connect directly.
    */
   torProxy: string;
-  /** What Tern should be given as its AI base URL, once the tunnel is up. */
-  ternBaseUrl: string;
+  /** Per-connection, so retiring one cannot affect any other. */
+  keyPath: string;
+  publicKey: string;
+  createdAt: string;
   configuredAt: string | null;
+  /**
+   * Set when the connection is removed here. The record is kept, without its
+   * key or its unit, until the account on the far side has been cleaned up —
+   * because perch cannot do that itself. The tunnel key is restricted to
+   * holding one port open and explicitly cannot run commands, which is the
+   * point of it; cleaning up remotely would mean keeping a credential here
+   * that could. So the record survives long enough to tell you what to run.
+   */
+  retiredAt: string | null;
 }
 
 export interface Settings {
@@ -66,31 +82,18 @@ export interface Settings {
 }
 
 export interface State {
-  version: 1;
+  version: 2;
   tokens: TokenRecord[];
   console: { passwordHash: string | null };
-  tunnel: TunnelConfig;
+  connections: Connection[];
   settings: Settings;
 }
 
 const DEFAULTS: State = {
-  version: 1,
+  version: 2,
   tokens: [],
   console: { passwordHash: null },
-  tunnel: {
-    host: '',
-    user: 'perch',
-    sshPort: 22,
-    remoteBind: '127.0.0.1',
-    remotePort: 11434,
-    // Derived rather than hardcoded: an install with a different state
-    // directory would otherwise be told the wrong path to its own key.
-    keyPath: path.join(config.stateDir, 'ssh', 'id_ed25519'),
-    publicKey: '',
-    torProxy: '',
-    ternBaseUrl: '',
-    configuredAt: null,
-  },
+  connections: [],
   settings: {
     allowManage: config.allowManage,
     keepAlive: '10m',
@@ -98,19 +101,49 @@ const DEFAULTS: State = {
   },
 };
 
+/** Where a connection's private key lives. Per connection, never shared. */
+export function keyPathFor(id: string): string {
+  return path.join(config.stateDir, 'ssh', id, 'id_ed25519');
+}
+
+export function newConnection(partial: Partial<Connection> & { id: string }): Connection {
+  return {
+    id: partial.id,
+    name: partial.name ?? partial.host ?? partial.id,
+    host: partial.host ?? '',
+    user: partial.user ?? 'perch',
+    sshPort: partial.sshPort ?? 22,
+    remoteBind: partial.remoteBind ?? '',
+    remotePort: partial.remotePort ?? 11434,
+    torProxy: partial.torProxy ?? '',
+    keyPath: keyPathFor(partial.id),
+    publicKey: partial.publicKey ?? '',
+    createdAt: partial.createdAt ?? new Date().toISOString(),
+    configuredAt: partial.configuredAt ?? null,
+    retiredAt: partial.retiredAt ?? null,
+  };
+}
+
 const FILE = path.join(config.stateDir, 'state.json');
 
 let cache: State | null = null;
 
 function merge(loaded: unknown): State {
-  const l = (loaded ?? {}) as Partial<State>;
+  const l = (loaded ?? {}) as Partial<State> & { tunnel?: Partial<Connection> & { ternBaseUrl?: string } };
+
+  // Version 1 held a single `tunnel` object. Carry it across as the first
+  // connection rather than losing somebody's working setup on an upgrade; the
+  // id is fixed so the unit and key it already has can be found again.
+  let connections: Connection[] = Array.isArray(l.connections) ? l.connections.map((c) => newConnection(c)) : [];
+  if (!connections.length && l.tunnel && (l.tunnel.host || l.tunnel.publicKey)) {
+    connections = [newConnection({ ...l.tunnel, id: 'default', name: l.tunnel.host || 'Tern' })];
+  }
+
   return {
-    version: 1,
+    version: 2,
     tokens: Array.isArray(l.tokens) ? l.tokens : [],
     console: { ...DEFAULTS.console, ...(l.console ?? {}) },
-    // keyPath moved from a hardcoded default to one derived from the state
-    // directory; a file written by an earlier version carries the old value.
-    tunnel: { ...DEFAULTS.tunnel, ...(l.tunnel ?? {}), keyPath: DEFAULTS.tunnel.keyPath },
+    connections,
     settings: { ...DEFAULTS.settings, ...(l.settings ?? {}) },
   };
 }

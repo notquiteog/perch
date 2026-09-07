@@ -62,6 +62,11 @@ jnum() { local v=${1-}; if [[ $v =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then printf '%s' 
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# A connection id becomes part of a unit filename and a path, so it is checked
+# before it is used as either.
+valid_id() { [[ ${1-} =~ ^[a-z0-9][a-z0-9-]{0,35}$ ]]; }
+unit_for() { printf 'perch-tunnel-%s.service' "$1"; }
+
 compose() {
   # Mirrors bin/perch so both take the same overlays into account.
   ( cd "$PERCH_DIR" 2>/dev/null && podman-compose --env-file "$PERCH_DIR/.env" "$@" ) 2>&1
@@ -174,6 +179,21 @@ unit_state() {
     "$(jstr "$unit")" "$(jstr "${active:-unknown}")" "$(jstr "${enabled:-unknown}")" "$(jstr "$since")"
 }
 
+# Every connection has its own unit, so the console is told about all of them
+# rather than about one. Units are found on disk rather than asked of systemd,
+# so a unit that exists but has never been started still shows up.
+read_tunnels() {
+  local out="" first=1 f unit
+  for f in /etc/systemd/system/perch-tunnel-*.service; do
+    [ -e "$f" ] || continue
+    unit="$(basename "$f")"
+    [ $first -eq 0 ] && out+=","
+    first=0
+    out+="$(unit_state "$unit")"
+  done
+  printf '[%s]' "$out"
+}
+
 write_status() {
   local tmp="$STATUS.tmp"
   {
@@ -188,7 +208,7 @@ write_status() {
     printf '"disk":%s,' "$(read_disk "$STATE_DIR")"
     printf '"containers":%s,' "$(read_containers)"
     printf '"boot":%s,' "$(unit_state perch.service)"
-    printf '"tunnel":%s,' "$(unit_state perch-tunnel.service)"
+    printf '"tunnels":%s,' "$(read_tunnels)"
     printf '"hostd":{"version":"0.1.0","interval":%s}' "$(jnum "$INTERVAL")"
     printf '}\n'
   } > "$tmp" 2>/dev/null
@@ -212,14 +232,19 @@ run_action() {
     containers.pull)     compose pull ;;
     boot.enable)         systemctl enable perch.service 2>&1 ;;
     boot.disable)        systemctl disable perch.service 2>&1 ;;
-    tunnel.start)        systemctl start perch-tunnel.service 2>&1 ;;
-    tunnel.stop)         systemctl stop perch-tunnel.service 2>&1 ;;
-    tunnel.restart)      systemctl restart perch-tunnel.service 2>&1 ;;
-    tunnel.enable)       systemctl enable --now perch-tunnel.service 2>&1 ;;
-    tunnel.disable)      systemctl disable --now perch-tunnel.service 2>&1 ;;
-    tunnel.logs)         journalctl -u perch-tunnel.service -n 100 --no-pager 2>&1 ;;
-    tunnel.keygen)       do_keygen ;;
-    tunnel.configure)    do_tunnel_configure ;;
+    tunnel.start|tunnel.stop|tunnel.restart|tunnel.enable|tunnel.disable|tunnel.logs)
+      valid_id "$arg" || { echo "bad connection id"; return 2; }
+      case "$action" in
+        tunnel.start)   systemctl start "$(unit_for "$arg")" 2>&1 ;;
+        tunnel.stop)    systemctl stop "$(unit_for "$arg")" 2>&1 ;;
+        tunnel.restart) systemctl restart "$(unit_for "$arg")" 2>&1 ;;
+        tunnel.enable)  systemctl enable --now "$(unit_for "$arg")" 2>&1 ;;
+        tunnel.disable) systemctl disable --now "$(unit_for "$arg")" 2>&1 ;;
+        tunnel.logs)    journalctl -u "$(unit_for "$arg")" -n 100 --no-pager 2>&1 ;;
+      esac ;;
+    tunnel.keygen)       do_keygen "$arg" ;;
+    tunnel.configure)    do_tunnel_configure "$arg" ;;
+    tunnel.remove)       do_tunnel_remove "$arg" ;;
     logs)
       case "$arg" in
         perch|ollama)    compose logs --tail=200 "$arg" ;;
@@ -233,16 +258,29 @@ run_action() {
   esac
 }
 
-# A dedicated key for the tunnel, generated on this box and never leaving it.
+# A dedicated key per connection, generated on this box and never leaving it.
+# Per connection rather than shared, so retiring one cannot strand another and
+# a key that leaks is good for exactly one machine.
 do_keygen() {
-  local dir="$STATE_DIR/ssh" key="$STATE_DIR/ssh/id_ed25519"
+  local id="$1"
+  valid_id "$id" || { echo "bad connection id"; return 2; }
+  local dir="$STATE_DIR/ssh/$id" key="$STATE_DIR/ssh/$id/id_ed25519"
   mkdir -p "$dir"; chmod 700 "$dir"
-  if [ -f "$key" ]; then echo "key already exists at $key"; cat "$key.pub"; return 0; fi
-  ssh-keygen -t ed25519 -N '' -C "perch@$(hostname 2>/dev/null || echo host)" -f "$key" >/dev/null 2>&1 || {
-    echo "ssh-keygen failed"; return 1; }
+
+  # An install that predates per-connection keys has one at the old shared
+  # path. Move it in rather than generating a second key the far side has
+  # never been told about.
+  if [ ! -f "$key" ] && [ "$id" = default ] && [ -f "$STATE_DIR/ssh/id_ed25519" ]; then
+    mv "$STATE_DIR/ssh/id_ed25519" "$key" 2>/dev/null || true
+    mv "$STATE_DIR/ssh/id_ed25519.pub" "$key.pub" 2>/dev/null || true
+    echo "adopted the existing key from before connections were separate"
+  fi
+
+  if [ ! -f "$key" ]; then
+    ssh-keygen -t ed25519 -N '' -C "perch-$id@$(hostname 2>/dev/null || echo host)" -f "$key" >/dev/null 2>&1 || {
+      echo "ssh-keygen failed"; return 1; }
+  fi
   chmod 600 "$key"; chmod 644 "$key.pub"
-  # The tunnel runs unprivileged, so the key it opens has to be readable by
-  # that account and by nothing else.
   if id "$TUNNEL_USER" >/dev/null 2>&1; then
     chown -R "$TUNNEL_USER" "$dir" 2>/dev/null || true
     touch "$dir/known_hosts"; chown "$TUNNEL_USER" "$dir/known_hosts" 2>/dev/null || true
@@ -258,9 +296,11 @@ do_keygen() {
 # are six related values that must be validated together, and a config file
 # both sides can read beats six chances to get an argument wrong.
 do_tunnel_configure() {
-  local conf="$STATE_DIR/tunnel.conf" tmpl="$PERCH_DIR/deploy/perch-tunnel.service.tmpl"
-  local unit=/etc/systemd/system/perch-tunnel.service
-  [ -f "$conf" ] || { echo "no tunnel.conf yet"; return 1; }
+  local id="$1"
+  valid_id "$id" || { echo "bad connection id"; return 2; }
+  local conf="$STATE_DIR/tunnels/$id.conf" tmpl="$PERCH_DIR/deploy/perch-tunnel.service.tmpl"
+  local unit; unit="/etc/systemd/system/$(unit_for "$id")"
+  [ -f "$conf" ] || { echo "no configuration for $id yet"; return 1; }
   [ -f "$tmpl" ] || { echo "missing $tmpl"; return 1; }
   local HOST="" USER="" SSH_PORT="" REMOTE_BIND="" REMOTE_PORT="" LOCAL_PORT="" TOR_PROXY=""
   while IFS='=' read -r k v; do
@@ -291,18 +331,16 @@ do_tunnel_configure() {
 
   local runas="$TUNNEL_USER"
   id "$runas" >/dev/null 2>&1 || runas=root
-  local key="$STATE_DIR/ssh/id_ed25519"
-  [ -f "$key" ] || { echo "no tunnel key yet; generate one first"; return 1; }
+  local key="$STATE_DIR/ssh/$id/id_ed25519"
+  [ -f "$key" ] || { echo "no key for $id yet; generate one first"; return 1; }
 
   # Dialling out through a SOCKS proxy — Tor, in practice. netcat does the
-  # SOCKS5 handshake and, importantly, hands the hostname to the proxy rather
-  # than resolving it here: that is both what stops a DNS leak and what makes
-  # an .onion address work at all, since there is no DNS that can answer for
-  # one.
+  # SOCKS5 handshake and hands the hostname to the proxy rather than resolving
+  # it here: that is both what stops a DNS leak and what makes an .onion work
+  # at all, since no DNS can answer for one.
   #
-  # %%h and %%p are escaped systemd specifiers; see the comment in the
-  # template. Getting that wrong is silent — ssh is simply handed the wrong
-  # host and port.
+  # %%h and %%p are escaped systemd specifiers; see the template. Getting that
+  # wrong is silent — ssh is handed the wrong host and port.
   local proxy_opt alive connect_timeout restart_sec
   if [ -n "$TOR_PROXY" ]; then
     [[ $TOR_PROXY =~ ^[0-9.]{7,15}:[0-9]{1,5}$ ]] || { echo "bad SOCKS proxy address"; return 2; }
@@ -313,34 +351,67 @@ do_tunnel_configure() {
     esac
     command -v nc >/dev/null 2>&1 || { echo "netcat (nc) is needed to dial through a SOCKS proxy"; return 1; }
     proxy_opt="-o \"ProxyCommand=$(command -v nc) -X 5 -x $TOR_PROXY %%h %%p\""
-    # Tor takes its time: building a circuit is seconds, reaching a hidden
-    # service can be the better part of a minute, and every reconnection pays
-    # it again. Waiting longer and retrying less often is the difference
-    # between a tunnel that settles and one that thrashes.
+    # Tor takes its time: a circuit is seconds, a hidden service can be most of
+    # a minute, and every reconnection pays it again.
     alive=60; connect_timeout=120; restart_sec=30
   else
     proxy_opt="-o TCPKeepAlive=yes"
     alive=30; connect_timeout=15; restart_sec=5
   fi
 
-  sed -e "s|__USER__|$USER|g" -e "s|__HOST__|$HOST|g" -e "s|__SSH_PORT__|$SSH_PORT|g" \
+  sed -e "s|__ID__|$id|g" -e "s|__USER__|$USER|g" -e "s|__HOST__|$HOST|g" -e "s|__SSH_PORT__|$SSH_PORT|g" \
       -e "s|__REMOTE_BIND__|$REMOTE_BIND|g" -e "s|__REMOTE_PORT__|$REMOTE_PORT|g" \
       -e "s|__LOCAL_PORT__|$LOCAL_PORT|g" -e "s|__KEY_PATH__|$key|g" \
-      -e "s|__STATE_DIR__|$STATE_DIR|g" -e "s|__RUNAS__|$runas|g" \
+      -e "s|__KEY_DIR__|$STATE_DIR/ssh/$id|g" -e "s|__RUNAS__|$runas|g" \
       -e "s|__PROXY_OPT__|$proxy_opt|g" -e "s|__ALIVE_INTERVAL__|$alive|g" \
       -e "s|__CONNECT_TIMEOUT__|$connect_timeout|g" -e "s|__RESTART_SEC__|$restart_sec|g" \
       "$tmpl" > "$unit" || { echo "could not write $unit"; return 1; }
   chmod 644 "$unit"
+
+  # An install from before connections were separate has a single unnamed
+  # unit. Retire it once its replacement exists, or two tunnels fight over the
+  # same remote port and neither wins.
+  if [ "$id" = default ] && [ -f /etc/systemd/system/perch-tunnel.service ]; then
+    systemctl disable --now perch-tunnel.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/perch-tunnel.service
+    echo "replaced the single-tunnel unit from the previous layout"
+  fi
+
   systemctl daemon-reload 2>&1
-  if [ "$(systemctl is-active perch-tunnel.service 2>/dev/null)" = active ]; then
-    systemctl restart perch-tunnel.service 2>&1
-    echo "tunnel reconfigured and restarted"
+  if [ "$(systemctl is-active "$(unit_for "$id")" 2>/dev/null)" = active ]; then
+    systemctl restart "$(unit_for "$id")" 2>&1
+    echo "$id reconfigured and restarted"
   else
-    echo "tunnel reconfigured (not running)"
+    echo "$id reconfigured (not running)"
   fi
 }
 
-# Ollama's tuning knobs, written into .env so they survive a restart. Only
+# Take a connection down completely on this machine: unit stopped, disabled and
+# deleted, key and configuration removed.
+#
+# What it does NOT do is touch the far side. The tunnel key is restricted with
+# command="/usr/sbin/nologin" so it cannot run anything over there, which is
+# the point of it — a credential here that could clean up remotely could also
+# do everything else. The console shows the command to run instead.
+#
+# Idempotent: everything is guarded, so removing something already removed
+# succeeds quietly.
+do_tunnel_remove() {
+  local id="$1"
+  valid_id "$id" || { echo "bad connection id"; return 2; }
+  local unit; unit="$(unit_for "$id")"
+  systemctl disable --now "$unit" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/$unit"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+  # The key goes with it. Keeping it would leave a credential for a machine
+  # perch no longer talks to.
+  rm -rf "${STATE_DIR:?}/ssh/$id"
+  rm -f "${STATE_DIR:?}/tunnels/$id.conf"
+  echo "removed $id from this machine"
+}
+
+# Ollama's tuning knobs, written into .env# Ollama's tuning knobs, written into .env so they survive a restart. Only
 # these keys, and only values of the shape each one takes — the file is read
 # by compose, so an unchecked value here would be an injection into the
 # container's environment.

@@ -182,44 +182,50 @@ export default function Status({ go }: { go: (page: string) => void }) {
           )}
         </Card>
 
-        <Card title="The link to Tern" sub="Where Tern reaches this machine, and whether the tunnel carrying it is up.">
-          <table>
+        <Card
+          title="Connections to Tern"
+          sub="Each machine running Tern has its own tunnel out of here."
+        >
+          {overview.connections.filter((c) => !c.retiredAt).length === 0 ? (
+            <>
+              <Empty>No connections yet.</Empty>
+              <div style={{ textAlign: 'center' }}>
+                <button className="primary" onClick={() => go('connect')}>Add a connection</button>
+              </div>
+            </>
+          ) : (
+            <table>
+              <thead>
+                <tr><th>Connection</th><th>Tunnel</th><th className="right">Boot</th><th className="right">Base URL</th></tr>
+              </thead>
+              <tbody>
+                {overview.connections.filter((c) => !c.retiredAt).map((c) => (
+                  <tr key={c.id}>
+                    <td>
+                      {c.name}
+                      <div className="mono" style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{c.user}@{c.host}</div>
+                    </td>
+                    <td>
+                      {c.status.active === 'active'
+                        ? <Tag tone="good">running</Tag>
+                        : c.status.configured ? <Tag tone="bad">{c.status.active}</Tag> : <Tag>unfinished</Tag>}
+                    </td>
+                    <td className="right">{c.status.enabled === 'enabled' ? <Tag tone="good">yes</Tag> : <Tag>no</Tag>}</td>
+                    <td className="right mono" style={{ fontSize: 11 }}>{c.status.configured ? c.ternBaseUrl : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <table style={{ marginTop: 12 }}>
             <tbody>
               <tr>
-                <td>Tunnel</td>
-                <td className="right">
-                  {overview.tunnel.active === 'active'
-                    ? <Tag tone="good">running</Tag>
-                    : overview.tunnel.configured
-                      ? <Tag tone="bad">{overview.tunnel.active}</Tag>
-                      : <Tag>not set up</Tag>}
-                </td>
-              </tr>
-              <tr>
-                <td>Starts at boot</td>
-                <td className="right">{overview.tunnel.enabled === 'enabled' ? <Tag tone="good">yes</Tag> : <Tag>no</Tag>}</td>
-              </tr>
-              <tr>
                 <td>Model endpoint</td>
-                <td className="right">{overview.tunnel.endpointUp ? <Tag tone="good">listening</Tag> : <Tag tone="bad">down</Tag>}</td>
+                <td className="right">{overview.endpointUp ? <Tag tone="good">listening</Tag> : <Tag tone="bad">down</Tag>}</td>
               </tr>
-              <tr>
-                <td>Tokens issued</td>
-                <td className="right mono">{overview.tokens}</td>
-              </tr>
+              <tr><td>Tokens issued</td><td className="right mono">{overview.tokens}</td></tr>
             </tbody>
           </table>
-
-          {overview.tunnel.configured ? (
-            <div style={{ marginTop: 14 }}>
-              <p className="sub" style={{ marginBottom: 7 }}>Tern&apos;s base URL, for Admin → AI model:</p>
-              <CodeBlock text={overview.tern.baseUrl} />
-            </div>
-          ) : (
-            <div style={{ marginTop: 14 }}>
-              <button className="primary" onClick={() => go('connect')}>Set up the tunnel</button>
-            </div>
-          )}
         </Card>
       </div>
 

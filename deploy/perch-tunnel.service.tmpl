@@ -6,7 +6,7 @@
 # on your home connection, no port is forwarded on your router, and the model
 # endpoint never exists on any interface but loopback at either end.
 [Unit]
-Description=perch reverse tunnel to the Tern host (__USER__@__HOST__)
+Description=perch tunnel "__ID__" to __USER__@__HOST__
 Documentation=https://github.com/notquiteog/perch/blob/main/docs/REMOTE.md
 After=network-online.target
 Wants=network-online.target
@@ -53,7 +53,7 @@ ExecStart=/usr/bin/ssh -NT \
   -o IdentitiesOnly=yes \
   -o BatchMode=yes \
   -o StrictHostKeyChecking=accept-new \
-  -o UserKnownHostsFile=__STATE_DIR__/ssh/known_hosts \
+  -o UserKnownHostsFile=__KEY_DIR__/known_hosts \
   -o ConnectTimeout=__CONNECT_TIMEOUT__ \
   -i __KEY_PATH__ \
   -p __SSH_PORT__ \
@@ -69,7 +69,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=__STATE_DIR__/ssh
+ReadWritePaths=__KEY_DIR__
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
