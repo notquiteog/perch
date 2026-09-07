@@ -235,8 +235,18 @@ function ConnectionCard({ c, open, busy, onToggle, onRun, setMessage }: {
         <button className="ghost sm">{open ? 'Close' : 'Open'}</button>
       </div>
 
-      {paired && running && (
+      {/* Shown as soon as the address is known, not only once the tunnel is up.
+          These are the values you go and put into Tern, and hiding them until
+          everything is green means they are missing at exactly the moment
+          somebody is trying to finish the setup. */}
+      {paired && (
         <div style={{ marginTop: 12 }}>
+          {!running && (
+            <Notice tone="bad">
+              These are the right values, but the tunnel is <strong>{c.status.active}</strong> — Tern
+              cannot reach them until it is running. Use Recent log below to see why.
+            </Notice>
+          )}
           {c.ternUrls.map((u) => (
             <div key={u.id} style={{ marginBottom: 10 }}>
               <p className="sub" style={{ marginBottom: 5 }}>
@@ -246,6 +256,23 @@ function ConnectionCard({ c, open, busy, onToggle, onRun, setMessage }: {
               <CodeBlock text={u.url} />
             </div>
           ))}
+          <div className="field" style={{ maxWidth: 560, marginTop: 4 }}>
+            <label>API key</label>
+            {newToken ? (
+              <>
+                <CodeBlock text={newToken} wrap />
+                <span className="hint">Copy it now — this is the only time it is shown.</span>
+              </>
+            ) : (
+              <div className="row">
+                <span className="hint">perch keeps only a hash, so an existing token cannot be shown again.</span>
+                <button className="sm" disabled={busy !== null}
+                  onClick={() => void onRun(k('tok'), async () => { setNewToken((await api.createToken(`Tern (${c.name})`, ['use', 'manage'])).token); })}>
+                  {busy === k('tok') ? <Spinner /> : 'Make a token'}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

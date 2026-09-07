@@ -276,6 +276,9 @@ do_keygen() {
   #
   # 711 lets another uid traverse to a path it already knows without being able
   # to list the directory, and the private key stays unreadable to it.
+  # Every level has to be traversable by the tunnel account, which owns the
+  # keys but owns none of the directories above them.
+  chmod 711 "$STATE_DIR" 2>/dev/null || true
   chmod 711 "$STATE_DIR/ssh" 2>/dev/null || true
   chmod 711 "$dir"
 

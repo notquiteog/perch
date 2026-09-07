@@ -285,7 +285,12 @@ fi
 
 # ---------- 6. the state directory ----------
 step "State"
-install -d -m 750 "$PERCH_STATE_DIR"
+# 711, not 750. Three different identities need to reach into this directory:
+# the console container (uid 1000, the owner), the host helper (root), and the
+# unprivileged account the tunnel runs as — which is none of those and cannot
+# traverse a 750 directory owned by somebody else. It failed as "Identity file
+# not accessible", which reads like a missing key rather than a missing +x.
+install -d -m 711 "$PERCH_STATE_DIR"
 # 711: the tunnel account owns the private keys and only it can read them,
 # but the console container (a different uid) must be able to traverse here to
 # read a public key back. See do_keygen in deploy/perch-hostd.
