@@ -208,11 +208,22 @@ case "$cmd" in
 
     # A GPU that is present but not visible to the container is the single
     # most common "why is this so slow" cause.
-    if command -v nvidia-smi >/dev/null 2>&1; then
-      if compose exec -T ollama nvidia-smi -L >/dev/null 2>&1; then ok "Ollama can see the GPU"
-      else bad "this machine has an NVIDIA GPU but the container cannot see it — the model is running on the CPU"
-           note "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml, then ./bin/perch restart"
-           fail=1; fi
+    #
+    # Checked by looking for the device node rather than by running nvidia-smi
+    # in there. nvidia-smi is only present when the container toolkit injected
+    # it; with the device-passthrough setup the GPU works perfectly well and
+    # nvidia-smi does not exist, so asking for it reports a fault on a machine
+    # that is fine — and then advises installing a toolkit it does not need.
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+      if compose exec -T ollama test -e /dev/nvidia0 2>/dev/null; then
+        ok "Ollama can reach the GPU"
+        if compose logs ollama 2>/dev/null | grep -q 'library=CUDA'; then ok "Ollama loaded the CUDA runtime"
+        else warn "the device is there but Ollama has not reported a CUDA device; see ./bin/perch logs ollama"; fi
+      else
+        bad "this machine has an NVIDIA GPU but the container cannot see it — the model is running on the CPU"
+        note "re-run sudo ./install.sh: it will pass the devices through, or use the container toolkit if you have it"
+        fail=1
+      fi
     fi
 
     echo

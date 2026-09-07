@@ -73,9 +73,28 @@ ISP outage does not leave it given up by morning.
 
 ---
 
-## Install
+## Before you start
 
 On the machine with the GPU:
+
+- **podman** and **podman-compose** (or `podman compose`)
+- **openssh-client** — the tunnel is ordinary `ssh`
+- **systemd**, for the tunnel and the host helper
+
+For an **NVIDIA** card, either is fine and the installer picks whichever it
+finds:
+
+- the NVIDIA container toolkit with CDI configured, or
+- nothing at all — the installer passes the `/dev/nvidia*` nodes through and
+  bind-mounts the driver libraries, which works because the ollama image
+  already carries `LD_LIBRARY_PATH=/usr/local/nvidia/lib64`
+
+For an **AMD** card, a ROCm-capable GPU with `/dev/kfd` present.
+
+You also need SSH access, with sudo, to each machine running Tern — once, to
+authorise a key.
+
+## Install
 
 ```bash
 git clone https://github.com/notquiteog/perch.git
@@ -83,24 +102,82 @@ cd perch
 sudo ./install.sh
 ```
 
-It finds your GPU, works out how big a model will fit, downloads one, starts
-the containers and prints a token. Then open `http://127.0.0.1:8099` and go to
-**Connect**.
+It finds the GPU and how to hand it to a container, sizes a model from the
+VRAM and downloads it (`gemma4:12b` on a 16 GB card), creates the unprivileged
+account the tunnel runs as, writes `.env`, installs the host helper, starts the
+containers, and prints an API token.
 
-Setting up the tunnel is three things: type the SSH host of the Tern box, run
-the one command it gives you over there, and paste back the single line that
-command prints. perch works out the rest — the address, the systemd unit,
-starting the tunnel, enabling it at boot, and a token — and finishes by showing
-the base URL and API key to paste into Tern's **Admin → AI model** page.
+**Copy that token.** perch stores only a hash and cannot show it again — though
+you can always make another.
 
-That one line back is the only thing you carry between the machines. perch
-cannot work it out for itself: the address belongs to the Tern box, and the
-tunnel key is deliberately restricted to `nologin`, so there is nothing perch
-can ask.
+Running it again is safe: your previous answers are the defaults, and nothing
+is rebuilt or restarted unless it changed.
 
-Requires podman, podman-compose and the openssh client. For an NVIDIA card you
-also need the container toolkit with CDI configured; the installer checks and
-tells you if it is missing.
+## Connect it to Tern
+
+Open `http://127.0.0.1:8099` and press **Add a connection**. Add one per
+machine running Tern.
+
+1. **Name it and give the SSH host** of the box Tern runs on. A key is
+   generated for that connection alone.
+2. **Open it** and run the one command it shows you on that box. It creates a
+   locked-down account, installs the key with restrictions so it can hold one
+   port open and do nothing else, teaches sshd to reap dead tunnels, and prints
+   a single line.
+3. **Paste that line back.** Paste the whole terminal output if it is easier —
+   perch finds the line in it. It then saves the address, writes the systemd
+   unit, starts the tunnel and enables it at boot.
+4. **Copy the base URL and API key** into Tern's **Admin → AI model**, with the
+   provider set to Ollama, and press **Test connection**.
+
+That pasted line is the only thing you carry between the machines, and it is
+one value perch cannot work out for itself: the address belongs to the Tern
+box, and the tunnel key is deliberately restricted to `nologin`, so there is
+nothing perch can ask.
+
+## Check it worked
+
+```bash
+./bin/perch doctor
+```
+
+It checks the endpoint, Ollama, whether a model is downloaded, the keys, the
+host helper, every connection, and — the usual culprit for "why is this so
+slow" — whether the container can actually see the GPU.
+
+`./bin/perch connections` lists what exists and whether each tunnel is up. And
+the console's **Activity** page answers the question that matters when Tern
+says the model is unreachable: did the request arrive here at all? If it shows
+up as a 401 the tunnel is fine and the token is wrong; if nothing appears, the
+problem is between Tern and the tunnel.
+
+When something does not work, [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+starts from the symptom.
+
+## A note on the console
+
+The console is bound to `127.0.0.1` and, running in a container, perch cannot
+tell a request forwarded from the host apart from one off your network — the
+port publish is what keeps it private. It says so on screen until you set a
+password:
+
+```bash
+./bin/perch console-password
+```
+
+Set one and the protection stops depending on a compose file nobody re-reads.
+You need one anyway to open the console from a laptop on your own network.
+
+## Removing a connection
+
+**Remove** deletes the service, the key and the settings here, then shows a
+command to run on the far side. perch cannot run it: the tunnel key can hold a
+port open and nothing else, and a credential here that could clean up remotely
+could also run anything on your mail server. The command is scoped to that
+connection's key, so another perch using the same server keeps working, and it
+is safe to run twice.
+
+Uninstalling perch entirely is in [docs/SETUP.md](docs/SETUP.md#uninstall).
 
 ---
 
@@ -121,6 +198,9 @@ The address is the podman bridge on the VPS rather than `127.0.0.1`, because
 Tern runs in a container, and loopback inside a container is the container.
 `deploy/tern-side-setup.sh` works that out for you, along with creating a
 locked-down account whose key may do nothing but hold that one port open.
+
+Each connection gets its own account, key and unit, so several machines can
+share one GPU and removing one leaves the others alone.
 
 Only private addresses are ever accepted — checked in the console, in the host
 helper and in the setup script — so a typo cannot put your model endpoint on
