@@ -13,7 +13,8 @@ const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'perch-tunnel-test-'));
 process.env.PERCH_STATE_DIR = stateDir;
 process.env.PERCH_LOG_LEVEL = 'error';
 
-const { validate, parsePairing } = await import('./tunnel.js');
+const { validate, parsePairing, saveTunnel } = await import('./tunnel.js');
+const { loadState } = await import('./state.js');
 
 test('private addresses are accepted', () => {
   for (const ip of ['127.0.0.1', '10.89.0.1', '10.0.0.1', '192.168.1.1', '172.16.0.1', '172.31.255.254']) {
@@ -78,6 +79,64 @@ test('a pairing line naming a public address is refused, however it arrives', ()
   // this is the value that decides what gets bound.
   assert.throws(() => parsePairing('perch-pair:v1:203.0.113.10:11434'), /private address/);
   assert.throws(() => parsePairing('perch-pair:v1:8.8.8.8:11434'), /private address/);
+});
+
+// Dialling out through Tor: the proxy has to be somewhere this machine
+// controls. A remote SOCKS proxy would see every byte of the tunnel before
+// Tor ever did, which is the opposite of the point.
+test('a local SOCKS proxy is accepted', () => {
+  for (const p of ['127.0.0.1:9050', '127.0.0.1:9150', '10.0.0.5:1080', '192.168.1.9:9050']) {
+    assert.doesNotThrow(() => validate({ torProxy: p }), `${p} should be allowed`);
+  }
+});
+
+test('an empty proxy means connect directly, and is allowed', () => {
+  assert.doesNotThrow(() => validate({ torProxy: '' }));
+});
+
+test('a remote SOCKS proxy is refused', () => {
+  assert.throws(() => validate({ torProxy: '203.0.113.10:9050' }), /this machine or your own network/);
+  assert.throws(() => validate({ torProxy: '8.8.8.8:1080' }), /this machine or your own network/);
+});
+
+test('a malformed proxy address is refused', () => {
+  for (const bad of ['127.0.0.1', '9050', 'localhost:9050', '127.0.0.1:notaport', '127.0.0.1:9050; sh']) {
+    assert.throws(() => validate({ torProxy: bad }), /address and port|port number/);
+  }
+});
+
+test('an .onion host is accepted — the whole point of dialling out over Tor', () => {
+  const onion = 'a'.repeat(56) + '.onion';
+  assert.doesNotThrow(() => validate({ host: onion }));
+});
+
+// A regression test with teeth. Saving one setting must not blank the others:
+// callers build a Partial from an optional request body, so every field they
+// did not send arrives as an explicit undefined, and a naive spread writes
+// those over perfectly good values.
+test('saving one setting leaves the rest alone', async () => {
+  await saveTunnel({ host: 'mail.example.com', user: 'perch', sshPort: 2222, remoteBind: '10.89.0.1', remotePort: 11434 });
+
+  // Exactly the shape an API handler produces for a body of {torProxy}.
+  await saveTunnel({
+    host: undefined, user: undefined, sshPort: undefined,
+    remoteBind: undefined, remotePort: undefined, torProxy: '127.0.0.1:9050',
+  });
+
+  const t = loadState().tunnel;
+  assert.equal(t.host, 'mail.example.com', 'host was blanked');
+  assert.equal(t.user, 'perch', 'user was blanked');
+  assert.equal(t.sshPort, 2222, 'sshPort was blanked');
+  assert.equal(t.remoteBind, '10.89.0.1', 'remoteBind was blanked');
+  assert.equal(t.remotePort, 11434, 'remotePort was blanked');
+  assert.equal(t.torProxy, '127.0.0.1:9050', 'torProxy was not applied');
+  assert.match(t.ternBaseUrl, /:11434$/, 'the base URL was rebuilt from a blanked port');
+});
+
+test('turning the proxy back off is a real change, not a no-op', async () => {
+  await saveTunnel({ torProxy: '' });
+  assert.equal(loadState().tunnel.torProxy, '');
+  assert.equal(loadState().tunnel.host, 'mail.example.com', 'host survived');
 });
 
 test.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));

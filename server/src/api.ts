@@ -302,6 +302,7 @@ export function buildApi(): Router {
       sshPort: typeof body.sshPort === 'number' ? body.sshPort : undefined,
       remoteBind: typeof body.remoteBind === 'string' ? body.remoteBind.trim() : undefined,
       remotePort: typeof body.remotePort === 'number' ? body.remotePort : undefined,
+      torProxy: typeof body.torProxy === 'string' ? body.torProxy.trim() : undefined,
     });
     // Rendering the unit needs root, so it happens on the host side.
     const applied = await hostAction('tunnel.configure', '', 30_000).catch((e: HttpError) => ({ ok: false, output: e.message }));

@@ -68,6 +68,8 @@ export interface TokenRecord {
 export interface TunnelConfig {
   host: string; user: string; sshPort: number;
   remoteBind: string; remotePort: number;
+  /** SOCKS5 proxy to dial out through, as host:port. Empty means direct. */
+  torProxy: string;
   keyPath: string; publicKey: string; ternBaseUrl: string; configuredAt: string | null;
 }
 

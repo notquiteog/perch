@@ -262,16 +262,19 @@ do_tunnel_configure() {
   local unit=/etc/systemd/system/perch-tunnel.service
   [ -f "$conf" ] || { echo "no tunnel.conf yet"; return 1; }
   [ -f "$tmpl" ] || { echo "missing $tmpl"; return 1; }
-  local HOST="" USER="" SSH_PORT="" REMOTE_BIND="" REMOTE_PORT="" LOCAL_PORT=""
+  local HOST="" USER="" SSH_PORT="" REMOTE_BIND="" REMOTE_PORT="" LOCAL_PORT="" TOR_PROXY=""
   while IFS='=' read -r k v; do
     case "$k" in
       HOST) HOST="$v" ;; USER) USER="$v" ;; SSH_PORT) SSH_PORT="$v" ;;
       REMOTE_BIND) REMOTE_BIND="$v" ;; REMOTE_PORT) REMOTE_PORT="$v" ;; LOCAL_PORT) LOCAL_PORT="$v" ;;
+      TOR_PROXY) TOR_PROXY="$v" ;;
     esac
   done < "$conf"
 
   # Validated here as well as in the console, because this is the side that
   # writes a root-owned unit file and runs what is in it.
+  # Matches .onion addresses too: 56 base32 characters plus ".onion" is well
+  # inside this, and the charset is the same.
   [[ $HOST =~ ^[A-Za-z0-9._-]{1,253}$ ]] || { echo "bad host"; return 2; }
   [[ $USER =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { echo "bad user"; return 2; }
   [[ $SSH_PORT =~ ^[0-9]{1,5}$ ]] || { echo "bad ssh port"; return 2; }
@@ -291,10 +294,41 @@ do_tunnel_configure() {
   local key="$STATE_DIR/ssh/id_ed25519"
   [ -f "$key" ] || { echo "no tunnel key yet; generate one first"; return 1; }
 
+  # Dialling out through a SOCKS proxy — Tor, in practice. netcat does the
+  # SOCKS5 handshake and, importantly, hands the hostname to the proxy rather
+  # than resolving it here: that is both what stops a DNS leak and what makes
+  # an .onion address work at all, since there is no DNS that can answer for
+  # one.
+  #
+  # %%h and %%p are escaped systemd specifiers; see the comment in the
+  # template. Getting that wrong is silent — ssh is simply handed the wrong
+  # host and port.
+  local proxy_opt alive connect_timeout restart_sec
+  if [ -n "$TOR_PROXY" ]; then
+    [[ $TOR_PROXY =~ ^[0-9.]{7,15}:[0-9]{1,5}$ ]] || { echo "bad SOCKS proxy address"; return 2; }
+    case "$TOR_PROXY" in
+      127.*|10.*|192.168.*) ;;
+      172.1[6-9].*|172.2[0-9].*|172.3[01].*) ;;
+      *) echo "refusing a SOCKS proxy that is not on this machine or your own network"; return 2 ;;
+    esac
+    command -v nc >/dev/null 2>&1 || { echo "netcat (nc) is needed to dial through a SOCKS proxy"; return 1; }
+    proxy_opt="-o \"ProxyCommand=$(command -v nc) -X 5 -x $TOR_PROXY %%h %%p\""
+    # Tor takes its time: building a circuit is seconds, reaching a hidden
+    # service can be the better part of a minute, and every reconnection pays
+    # it again. Waiting longer and retrying less often is the difference
+    # between a tunnel that settles and one that thrashes.
+    alive=60; connect_timeout=120; restart_sec=30
+  else
+    proxy_opt="-o TCPKeepAlive=yes"
+    alive=30; connect_timeout=15; restart_sec=5
+  fi
+
   sed -e "s|__USER__|$USER|g" -e "s|__HOST__|$HOST|g" -e "s|__SSH_PORT__|$SSH_PORT|g" \
       -e "s|__REMOTE_BIND__|$REMOTE_BIND|g" -e "s|__REMOTE_PORT__|$REMOTE_PORT|g" \
       -e "s|__LOCAL_PORT__|$LOCAL_PORT|g" -e "s|__KEY_PATH__|$key|g" \
       -e "s|__STATE_DIR__|$STATE_DIR|g" -e "s|__RUNAS__|$runas|g" \
+      -e "s|__PROXY_OPT__|$proxy_opt|g" -e "s|__ALIVE_INTERVAL__|$alive|g" \
+      -e "s|__CONNECT_TIMEOUT__|$connect_timeout|g" -e "s|__RESTART_SEC__|$restart_sec|g" \
       "$tmpl" > "$unit" || { echo "could not write $unit"; return 1; }
   chmod 644 "$unit"
   systemctl daemon-reload 2>&1

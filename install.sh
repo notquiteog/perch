@@ -65,6 +65,12 @@ have ssh || die "the openssh client is not installed; the tunnel needs it. apt i
 have ssh-keygen || die "ssh-keygen is missing (openssh-client)."
 ok "ssh $(ssh -V 2>&1 | awk '{print $1}')"
 have systemctl || warn "no systemd here; the tunnel and the host helper will have to be run by hand."
+# Not required, but worth saying: if Tor is already here, the tunnel can use
+# it, and the Connect page is where that is switched on.
+if ss -lnt 2>/dev/null | grep -q '127.0.0.1:9050'; then
+  ok "Tor is running on 127.0.0.1:9050"
+  note "the tunnel can dial out through it — Connect → advanced settings"
+fi
 
 RAM_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
 RAM_GB=$(( RAM_KB / 1024 / 1024 ))

@@ -44,6 +44,13 @@ export interface TunnelConfig {
   /** Path to the tunnel's private key, on this machine, outside the container. */
   keyPath: string;
   publicKey: string;
+  /**
+   * A SOCKS5 proxy to dial out through, as host:port — in practice Tor's
+   * 127.0.0.1:9050. Empty means connect directly. With this set the Tern box
+   * never learns this machine's address, and its SSH port can be an .onion
+   * that is not on the public internet at all.
+   */
+  torProxy: string;
   /** What Tern should be given as its AI base URL, once the tunnel is up. */
   ternBaseUrl: string;
   configuredAt: string | null;
@@ -80,6 +87,7 @@ const DEFAULTS: State = {
     // directory would otherwise be told the wrong path to its own key.
     keyPath: path.join(config.stateDir, 'ssh', 'id_ed25519'),
     publicKey: '',
+    torProxy: '',
     ternBaseUrl: '',
     configuredAt: null,
   },

@@ -50,6 +50,13 @@ appear token by token.
 - **Settings** — issue and revoke tokens, set a console password, choose
   whether the model is dropped from memory when idle.
 
+**Optionally over Tor.** The tunnel can dial out through a SOCKS proxy, so the
+Tern box never learns your home address — and if its SSH host is an `.onion`,
+the VPS needs no public SSH port at all. perch adjusts the timeouts to suit,
+which matters more than it sounds: the default 15-second connect timeout is not
+long enough to reach a hidden service, and the result is a tunnel that retries
+forever without ever connecting. See [docs/REMOTE.md](docs/REMOTE.md#over-tor).
+
 **A tunnel that stays up.** systemd owns it, with `ExitOnForwardFailure` so a
 half-open forward is retried rather than sat on, keepalives so a dead home
 connection is noticed in ninety seconds, and no restart limit so an overnight

@@ -216,3 +216,131 @@ podman exec -it tern_app_1 wget -qO- http://host.containers.internal:11434/healt
 
 If that works and Tern still cannot reach the model, the problem is the token,
 not the tunnel — and perch's Activity page will show the 401.
+
+
+---
+
+## Over Tor
+
+The tunnel is ordinary SSH, so it can dial out through a SOCKS proxy. Two
+reasons you might want that:
+
+- **The Tern box never learns your home address.** It sees a connection from a
+  Tor exit or, with a hidden service, from nowhere at all.
+- **With an .onion address, the VPS needs no public SSH port.** Nothing on the
+  internet can reach sshd there — not to log in, not to scan, not to guess.
+  That second one is the real prize.
+
+### The short way
+
+perch's Connect page → **Show advanced settings** → **Dial out through a SOCKS
+proxy**, and press **Use Tor** (which fills in `127.0.0.1:9050`). Put the
+`.onion` address in the SSH host field if you have set up a hidden service.
+
+perch renders the systemd unit accordingly and adjusts three things that
+matter, which is most of the reason to let it do this rather than editing the
+unit yourself:
+
+| | Direct | Over Tor |
+|---|---|---|
+| `ConnectTimeout` | 15s | **120s** |
+| `ServerAliveInterval` | 30s | **60s** |
+| `RestartSec` | 5s | **30s** |
+
+Fifteen seconds is not enough to reach a hidden service. The default would
+time out, systemd would restart it five seconds later, and it would time out
+again — a tunnel that thrashes forever and never connects, with logs that look
+like a network fault rather than a timeout that is simply too short.
+
+### What it renders, and the trap in it
+
+```
+-o "ProxyCommand=/usr/bin/nc -X 5 -x 127.0.0.1:9050 %%h %%p"
+```
+
+Note the **doubled percent signs**. In a systemd unit file `%h` and `%p` are
+systemd's own specifiers — the user's home directory and the unit prefix — and
+they are expanded before the command runs. Written singly, ssh is handed
+something like `/var/lib/perch perch-tunnel` in place of the host and port,
+and the failure looks like a DNS problem. In a shell you write `%h %p`; in a
+unit file you write `%%h %%p`.
+
+`nc -X 5` is SOCKS5 and `-x` is the proxy. It passes the **hostname** to Tor
+rather than resolving it here, which is both what prevents a DNS leak and what
+makes `.onion` work at all — there is no DNS that can answer for an onion
+address.
+
+### What about torsocks
+
+`torsocks ssh …` works, and for a one-off from a terminal it is the quickest
+thing:
+
+```bash
+torsocks ssh -NT -o ExitOnForwardFailure=yes \
+  -i /var/lib/perch/ssh/id_ed25519 \
+  -R 10.89.0.1:11434:127.0.0.1:11434 perch@abc…xyz.onion
+```
+
+perch uses `ProxyCommand` for the long-running unit instead, for three
+reasons:
+
+1. **torsocks is an `LD_PRELOAD` shim.** It intercepts libc socket calls. That
+   is a lot of machinery to have inside a hardened systemd unit with a syscall
+   filter and `MemoryDenyWriteExecute`, for something `ProxyCommand` does with
+   no interception at all.
+2. **It is one more package to have installed.** `nc` is already there on
+   anything that has `ssh`.
+3. **`ProxyCommand` is per-connection and visible in the unit.** You can read
+   the unit file and see exactly what the tunnel dials through. With
+   `LD_PRELOAD` the routing is invisible in the command.
+
+If you would rather use it anyway, the unit's `ExecStart` becomes
+`/usr/bin/torsocks /usr/bin/ssh …` and you should still raise the timeouts as
+in the table above. Set `TORSOCKS_ALLOW_INBOUND=1` is *not* needed — the
+tunnel makes no inbound connections on this side.
+
+### A hidden service for sshd on the Tern box
+
+On the VPS, in `/etc/tor/torrc`:
+
+```
+HiddenServiceDir /var/lib/tor/perch-ssh/
+HiddenServiceVersion 3
+HiddenServicePort 22 127.0.0.1:22
+```
+
+Then:
+
+```bash
+sudo systemctl restart tor
+sudo cat /var/lib/tor/perch-ssh/hostname     # abc…xyz.onion
+```
+
+Put that in perch's **SSH host** field. Once it works you can close port 22 to
+the internet entirely — the hidden service reaches sshd over loopback, so
+firewalling the public port changes nothing about the tunnel.
+
+For more than that, Tor v3 onion services support **client authorisation**: a
+key that must be presented before the service will even complete a handshake,
+so the address alone is useless to anyone who learns it. That is `ClientAuthV3`
+in torrc and a matching key in `ClientOnionAuthDir` on this side.
+
+### What not to send over Tor
+
+Model downloads. A 14 GB pull over Tor is slow for you and unkind to a
+volunteer-run network. perch keeps them separate: only the tunnel uses the
+proxy, and `ollama pull` goes out normally.
+
+### Expect it to be slower
+
+A first token that took 400 ms direct may take two or three seconds over Tor,
+and the tunnel takes noticeably longer to establish after a restart. Generation
+speed itself is unaffected — that is the GPU, and the tokens are small. Writing
+email is a good fit for this; it is a few kilobytes each way.
+
+Check it is actually going over Tor:
+
+```bash
+./bin/perch tunnel status
+systemctl cat perch-tunnel.service | grep -i proxycommand
+```

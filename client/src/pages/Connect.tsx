@@ -13,7 +13,7 @@ export default function Connect() {
   const [page, setPage] = useState<TunnelPage | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: 'good' | 'bad' | 'info'; text: string } | null>(null);
-  const [form, setForm] = useState({ host: '', user: 'perch', sshPort: 22, remotePort: 11434 });
+  const [form, setForm] = useState({ host: '', user: 'perch', sshPort: 22, remotePort: 11434, torProxy: '' });
   const [paste, setPaste] = useState('');
   const [newToken, setNewToken] = useState<string | null>(null);
   const [tokens, setTokens] = useState<TokenRecord[]>([]);
@@ -29,6 +29,7 @@ export default function Connect() {
       user: t.config.user,
       sshPort: t.config.sshPort,
       remotePort: t.config.remotePort,
+      torProxy: t.config.torProxy,
     }));
   }, []);
 
@@ -152,29 +153,56 @@ export default function Connect() {
                   onChange={(e) => setForm({ ...form, sshPort: Number(e.target.value) })} />
               </div>
               <button disabled={busy !== null || !form.host} style={{ marginBottom: 1 }}
-                onClick={() => void run('save', () => api.saveTunnel({ host: form.host, sshPort: form.sshPort, user: form.user, remotePort: form.remotePort }), 'Saved.')}>
+                onClick={() => void run('save', () => api.saveTunnel({ host: form.host, sshPort: form.sshPort, user: form.user, remotePort: form.remotePort, torProxy: form.torProxy }), 'Saved.')}>
                 {busy === 'save' ? <Spinner /> : 'Save'}
               </button>
             </div>
 
-            <button className="ghost sm" style={{ marginTop: 10 }} onClick={() => setAdvanced(!advanced)}>
-              {advanced ? 'Hide' : 'Show'} the other two settings
-            </button>
+            <div className="row" style={{ marginTop: 10 }}>
+              <button className="ghost sm" onClick={() => setAdvanced(!advanced)}>
+                {advanced ? 'Hide' : 'Show'} advanced settings
+              </button>
+              {page.config.torProxy && <Tag tone="accent">over Tor</Tag>}
+            </div>
             {advanced && (
-              <div className="grid cols-2" style={{ maxWidth: 480, marginTop: 8 }}>
-                <div className="field">
-                  <label htmlFor="user">Tunnel account</label>
-                  <input id="user" type="text" value={form.user}
-                    onChange={(e) => setForm({ ...form, user: e.target.value })} />
-                  <span className="hint">Created for you on the Tern box, with no shell. Not your own login.</span>
+              <>
+                <div className="grid cols-2" style={{ maxWidth: 480, marginTop: 8 }}>
+                  <div className="field">
+                    <label htmlFor="user">Tunnel account</label>
+                    <input id="user" type="text" value={form.user}
+                      onChange={(e) => setForm({ ...form, user: e.target.value })} />
+                    <span className="hint">Created for you on the Tern box, with no shell. Not your own login.</span>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="remotePort">Port over there</label>
+                    <input id="remotePort" type="number" value={form.remotePort}
+                      onChange={(e) => setForm({ ...form, remotePort: Number(e.target.value) })} />
+                    <span className="hint">Where Tern will find the model. Change it only if 11434 is taken.</span>
+                  </div>
                 </div>
-                <div className="field">
-                  <label htmlFor="remotePort">Port over there</label>
-                  <input id="remotePort" type="number" value={form.remotePort}
-                    onChange={(e) => setForm({ ...form, remotePort: Number(e.target.value) })} />
-                  <span className="hint">Where Tern will find the model. Change it only if 11434 is taken.</span>
+                <div className="field" style={{ maxWidth: 480 }}>
+                  <label htmlFor="torProxy">Dial out through a SOCKS proxy</label>
+                  <div className="row">
+                    <input id="torProxy" type="text" placeholder="empty = connect directly" value={form.torProxy}
+                      onChange={(e) => setForm({ ...form, torProxy: e.target.value })} style={{ maxWidth: 220 }} />
+                    <button className="sm" disabled={busy !== null || form.torProxy === page.config.torProxy}
+                      onClick={() => void run('save', () => api.saveTunnel({ torProxy: form.torProxy }), form.torProxy ? 'Saved — the tunnel will dial out through the proxy.' : 'Saved — connecting directly.')}>
+                      {busy === 'save' ? <Spinner /> : 'Save'}
+                    </button>
+                    {!form.torProxy && (
+                      <button className="ghost sm" onClick={() => setForm({ ...form, torProxy: '127.0.0.1:9050' })}>
+                        Use Tor
+                      </button>
+                    )}
+                  </div>
+                  <span className="hint">
+                    <span className="mono">127.0.0.1:9050</span> for a system Tor. The Tern box then never learns
+                    this machine&apos;s address, and its SSH host above can be an <span className="mono">.onion</span>,
+                    which means it needs no public SSH port at all. perch waits longer and retries more slowly when
+                    this is set, because Tor is slow to build a circuit.
+                  </span>
                 </div>
-              </div>
+              </>
             )}
           </li>
 

@@ -37,14 +37,27 @@ function isPrivateIp(ip: string): boolean {
 }
 
 export function validate(input: Partial<TunnelConfig>): void {
+  // An .onion address passes this as-is: it is only letters, digits and dots.
+  // That is deliberate — pointing the tunnel at a hidden service is the best
+  // version of this, because then the Tern box needs no public SSH port.
   if (input.host !== undefined && !/^[A-Za-z0-9._-]{1,253}$/.test(input.host)) {
-    throw badRequest('That does not look like a hostname or an IP address.');
+    throw badRequest('That does not look like a hostname, an IP address or an .onion address.');
   }
   if (input.user !== undefined && !/^[a-z_][a-z0-9_-]{0,31}$/.test(input.user)) {
     throw badRequest('That is not a valid Linux account name.');
   }
   for (const [k, v] of [['sshPort', input.sshPort], ['remotePort', input.remotePort]] as const) {
     if (v !== undefined && (!Number.isInteger(v) || v < 1 || v > 65535)) throw badRequest(`${k} must be a port number.`);
+  }
+  if (input.torProxy !== undefined && input.torProxy !== '') {
+    // A SOCKS proxy on this machine is the whole idea; one somewhere else
+    // would mean handing an outside party every byte of the tunnel before Tor
+    // ever sees it.
+    const m = /^([0-9.]+):(\d{1,5})$/.exec(input.torProxy);
+    if (!m) throw badRequest('The SOCKS proxy wants an address and port, such as 127.0.0.1:9050.');
+    if (!isPrivateIp(m[1]!)) throw badRequest('The SOCKS proxy must be on this machine or your own network, not a remote address.');
+    const port = Number(m[2]);
+    if (port < 1 || port > 65535) throw badRequest('That is not a port number.');
   }
   if (input.remoteBind !== undefined && !isPrivateIp(input.remoteBind)) {
     // The same rail as both scripts. It is stated three times because it is
@@ -58,10 +71,19 @@ export function validate(input: Partial<TunnelConfig>): void {
 
 export async function saveTunnel(input: Partial<TunnelConfig>): Promise<TunnelConfig> {
   validate(input);
+  // Spreading drops explicit undefined on the floor only if it is not there:
+  // `{...current, ...{user: undefined}}` sets user to undefined rather than
+  // leaving it alone. Callers build a Partial by reading optional fields off a
+  // request body, so every field the caller did not send arrives as an
+  // explicit undefined — and a save of one setting would blank the rest.
+  const patch = Object.fromEntries(
+    Object.entries(input).filter(([, v]) => v !== undefined),
+  ) as Partial<TunnelConfig>;
+
   const next = updateState((s) => {
-    s.tunnel = { ...s.tunnel, ...input, publicKey: publicKey() ?? s.tunnel.publicKey };
+    s.tunnel = { ...s.tunnel, ...patch, publicKey: publicKey() ?? s.tunnel.publicKey };
     s.tunnel.ternBaseUrl = ternBaseUrl(s.tunnel);
-    if (input.host || input.user) s.tunnel.configuredAt = new Date().toISOString();
+    if (patch.host || patch.user) s.tunnel.configuredAt = new Date().toISOString();
   }).tunnel;
 
   // The helper reads this rather than taking six arguments; see
@@ -76,6 +98,7 @@ export async function saveTunnel(input: Partial<TunnelConfig>): Promise<TunnelCo
       `REMOTE_BIND=${next.remoteBind}`,
       `REMOTE_PORT=${next.remotePort}`,
       `LOCAL_PORT=${config.proxyPort}`,
+      `TOR_PROXY=${next.torProxy}`,
       '',
     ].join('\n'),
     { mode: 0o600 },
@@ -125,10 +148,16 @@ export function ternSetupManual(t: TunnelConfig): string {
 
 /** What systemd will actually run, for the console to show. */
 export function sshCommandPreview(t: TunnelConfig): string {
+  const tor = Boolean(t.torProxy);
   return [
     'ssh -NT',
+    ...(tor ? [`  -o "ProxyCommand=/usr/bin/nc -X 5 -x ${t.torProxy} %h %p"`] : []),
     '  -o ExitOnForwardFailure=yes',
-    '  -o ServerAliveInterval=30 -o ServerAliveCountMax=3',
+    // Tor is slow to build a circuit and slower still to reach a hidden
+    // service, and every reconnection pays that cost again — so the tunnel
+    // waits longer before giving up and probes less often.
+    tor ? '  -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -o ConnectTimeout=120'
+        : '  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=15',
     `  -i ${t.keyPath}`,
     `  -p ${t.sshPort}`,
     `  -R ${t.remoteBind}:${t.remotePort}:127.0.0.1:${config.proxyPort}`,

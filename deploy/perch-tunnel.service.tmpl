@@ -10,6 +10,15 @@ Description=perch reverse tunnel to the Tern host (__USER__@__HOST__)
 Documentation=https://github.com/notquiteog/perch/blob/main/docs/REMOTE.md
 After=network-online.target
 Wants=network-online.target
+# A home connection can be down for a long time — an ISP outage, a router
+# reboot, a laptop lid. systemd's default is to give up after five restarts in
+# ten seconds and stay given up; that would mean coming home to a tunnel that
+# stopped trying hours ago. Retry forever instead.
+#
+# This belongs in [Unit]. systemd accepts StartLimit* only here — put it in
+# [Service] and it is ignored with a warning nobody reads, which is worse than
+# not setting it, because the unit looks like it retries and does not.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -29,28 +38,30 @@ Group=__RUNAS__
 # anyone, and TCP alone will sit on a dead socket for hours. Three missed
 # probes at thirty seconds means a dead tunnel is noticed within 90 seconds
 # and restarted, rather than at whatever time you next try to write an email.
+#
+# The third option below is where a SOCKS proxy goes when the tunnel dials out
+# through Tor. Note the doubled percent signs there: in a unit
+# file %h and %p are systemd's own specifiers — the user's home directory and
+# the unit prefix — so an unescaped "%h %p" would be replaced by systemd
+# before ssh ever saw it, and ssh would be handed a path and a unit name in
+# place of the host and port. %%h and %%p reach ssh as %h and %p.
 ExecStart=/usr/bin/ssh -NT \
   -o ExitOnForwardFailure=yes \
-  -o ServerAliveInterval=30 \
+  -o ServerAliveInterval=__ALIVE_INTERVAL__ \
   -o ServerAliveCountMax=3 \
-  -o TCPKeepAlive=yes \
+  __PROXY_OPT__ \
   -o IdentitiesOnly=yes \
   -o BatchMode=yes \
   -o StrictHostKeyChecking=accept-new \
   -o UserKnownHostsFile=__STATE_DIR__/ssh/known_hosts \
-  -o ConnectTimeout=15 \
+  -o ConnectTimeout=__CONNECT_TIMEOUT__ \
   -i __KEY_PATH__ \
   -p __SSH_PORT__ \
   -R __REMOTE_BIND__:__REMOTE_PORT__:127.0.0.1:__LOCAL_PORT__ \
   __USER__@__HOST__
 
 Restart=always
-RestartSec=5
-# A home connection can be down for a long time — an ISP outage, a router
-# reboot, a laptop lid. systemd's default is to give up after five restarts in
-# ten seconds and stay given up; that would mean coming home to a tunnel that
-# stopped trying hours ago. Retry forever instead.
-StartLimitIntervalSec=0
+RestartSec=__RESTART_SEC__
 
 # The tunnel needs one private key and a network socket. Nothing else on this
 # machine is any of its business.

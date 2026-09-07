@@ -5,6 +5,8 @@
 Description=perch host helper (telemetry and container control)
 Documentation=https://github.com/notquiteog/perch/blob/main/docs/ARCHITECTURE.md
 After=network.target
+# In [Unit], not [Service]: systemd ignores StartLimit* in [Service].
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -19,7 +21,6 @@ Environment=PERCH_GID=__PERCH_GID__
 ExecStart=__PERCH_DIR__/deploy/perch-hostd
 Restart=always
 RestartSec=3
-StartLimitIntervalSec=0
 
 NoNewPrivileges=yes
 ProtectHome=yes
