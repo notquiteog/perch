@@ -1,0 +1,15 @@
+# Optional overlay: hand an AMD GPU to Ollama, using the ROCm image.
+#
+# The device nodes have to be passed through, and the container needs to be in
+# the video and render groups to open them.
+services:
+  ollama:
+    image: ${OLLAMA_IMAGE:-docker.io/ollama/ollama:rocm}
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - render
+    security_opt:
+      - label=disable

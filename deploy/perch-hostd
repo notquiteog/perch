@@ -1,0 +1,381 @@
+#!/usr/bin/env bash
+# =============================================================================
+# perch-hostd — the small piece of perch that runs on the host rather than in
+# a container.
+#
+# It exists for two reasons the container cannot satisfy on its own:
+#
+#   1. Telemetry. The perch container does not have the GPU — Ollama does —
+#      and inside a container /proc/meminfo and `df` describe the container,
+#      not the machine. So the host reads the real numbers and publishes them.
+#   2. Control. Starting and stopping containers, enabling them at boot and
+#      driving the tunnel all mean talking to podman and systemd. Handing the
+#      podman socket to the container would have been three lines of compose
+#      and would also mean that a bug in the internet-facing proxy is root on
+#      this machine. Instead the container asks for one of a fixed list of
+#      actions, by name, and this script decides whether to do it.
+#
+# The channel is deliberately boring: files in a shared directory. perch drops
+# a request, this loop picks it up, runs the matching action and writes the
+# result back. No socket to secure, no RPC to get wrong, and every request is
+# a file you can read while debugging.
+#
+# Actions are matched against a literal case list. Arguments are validated
+# before use and never reach a shell unquoted. If an action is not in the list
+# below, it cannot be performed, whatever the container asks for.
+# =============================================================================
+set -uo pipefail
+
+PERCH_DIR="${PERCH_DIR:-/opt/perch}"
+STATE_DIR="${PERCH_STATE_DIR:-/var/lib/perch}"
+HOST_DIR="$STATE_DIR/host"
+REQ_DIR="$HOST_DIR/requests"
+RES_DIR="$HOST_DIR/results"
+STATUS="$HOST_DIR/status.json"
+INTERVAL="${PERCH_HOSTD_INTERVAL:-1}"
+# The account the console container runs as, so it can write requests.
+OWNER_UID="${PERCH_UID:-1000}"
+OWNER_GID="${PERCH_GID:-1000}"
+# The unprivileged account the tunnel unit runs as, so the key it needs can
+# belong to it rather than to root.
+TUNNEL_USER="${PERCH_TUNNEL_USER:-perch}"
+
+mkdir -p "$REQ_DIR" "$RES_DIR"
+chown "$OWNER_UID:$OWNER_GID" "$HOST_DIR" "$REQ_DIR" 2>/dev/null || true
+chmod 755 "$HOST_DIR"; chmod 733 "$REQ_DIR"; chmod 755 "$RES_DIR"
+
+log() { printf '%s perch-hostd: %s\n' "$(date -Is)" "$*" >&2; }
+
+# ---------- JSON helpers (no jq: this runs before anything is installed) ----------
+json_escape() {
+  local s=${1-}
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+jstr() { printf '"%s"' "$(json_escape "${1-}")"; }
+# A number, or null when the value is empty or not numeric.
+jnum() { local v=${1-}; if [[ $v =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then printf '%s' "$v"; else printf 'null'; fi; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+compose() {
+  # Mirrors bin/perch so both take the same overlays into account.
+  ( cd "$PERCH_DIR" 2>/dev/null && podman-compose --env-file "$PERCH_DIR/.env" "$@" ) 2>&1
+}
+
+# ---------- telemetry ----------
+
+read_mem() {
+  # /proc/meminfo on the host: the true totals, in kB.
+  local total avail free swaptotal swapfree
+  total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)
+  avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)
+  free=$(awk '/^MemFree:/{print $2}' /proc/meminfo 2>/dev/null)
+  swaptotal=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo 2>/dev/null)
+  swapfree=$(awk '/^SwapFree:/{print $2}' /proc/meminfo 2>/dev/null)
+  printf '{"totalKb":%s,"availableKb":%s,"freeKb":%s,"swapTotalKb":%s,"swapFreeKb":%s}' \
+    "$(jnum "$total")" "$(jnum "$avail")" "$(jnum "$free")" "$(jnum "$swaptotal")" "$(jnum "$swapfree")"
+}
+
+read_cpu() {
+  local load1 load5 load15 cores
+  read -r load1 load5 load15 _ < /proc/loadavg
+  cores=$(nproc 2>/dev/null || echo 1)
+  printf '{"load1":%s,"load5":%s,"load15":%s,"cores":%s}' \
+    "$(jnum "$load1")" "$(jnum "$load5")" "$(jnum "$load15")" "$(jnum "$cores")"
+}
+
+read_gpu() {
+  # NVIDIA through nvidia-smi; AMD through the sysfs the amdgpu driver
+  # exposes. Both are best effort — a box with neither reports an empty list
+  # and the console simply does not draw a VRAM gauge.
+  local out=""
+  if have nvidia-smi; then
+    local line first=1
+    while IFS=, read -r name memtotal memused util temp power; do
+      [ -z "${name// /}" ] && continue
+      [ $first -eq 0 ] && out+=","
+      first=0
+      out+=$(printf '{"vendor":"nvidia","name":%s,"memTotalMb":%s,"memUsedMb":%s,"utilPct":%s,"tempC":%s,"powerW":%s}' \
+        "$(jstr "$(echo "$name" | xargs)")" "$(jnum "$(echo "$memtotal" | xargs)")" "$(jnum "$(echo "$memused" | xargs)")" \
+        "$(jnum "$(echo "$util" | xargs)")" "$(jnum "$(echo "$temp" | xargs)")" "$(jnum "$(echo "$power" | xargs)")")
+    done < <(nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu,power.draw \
+                        --format=csv,noheader,nounits 2>/dev/null)
+  elif [ -d /sys/class/drm ]; then
+    local card first=1
+    for card in /sys/class/drm/card*/device; do
+      [ -r "$card/mem_info_vram_total" ] || continue
+      local total used util name
+      total=$(( $(cat "$card/mem_info_vram_total" 2>/dev/null || echo 0) / 1048576 ))
+      used=$(( $(cat "$card/mem_info_vram_used" 2>/dev/null || echo 0) / 1048576 ))
+      util=$(cat "$card/gpu_busy_percent" 2>/dev/null || echo "")
+      name=$(cat "$card/product_name" 2>/dev/null || echo "AMD GPU")
+      [ "$total" -eq 0 ] && continue
+      [ $first -eq 0 ] && out+=","
+      first=0
+      out+=$(printf '{"vendor":"amd","name":%s,"memTotalMb":%s,"memUsedMb":%s,"utilPct":%s,"tempC":null,"powerW":null}' \
+        "$(jstr "$name")" "$(jnum "$total")" "$(jnum "$used")" "$(jnum "$util")")
+    done
+  fi
+  printf '[%s]' "$out"
+}
+
+read_disk() {
+  # Where the models actually live, which is the number that matters when a
+  # pull is about to fail.
+  local target="$1" line size used avail pct
+  line=$(df -Pk "$target" 2>/dev/null | tail -1)
+  size=$(echo "$line" | awk '{print $2}'); used=$(echo "$line" | awk '{print $3}')
+  avail=$(echo "$line" | awk '{print $4}'); pct=$(echo "$line" | awk '{print $5}' | tr -d '%')
+  printf '{"path":%s,"totalKb":%s,"usedKb":%s,"availableKb":%s,"usedPct":%s}' \
+    "$(jstr "$target")" "$(jnum "$size")" "$(jnum "$used")" "$(jnum "$avail")" "$(jnum "$pct")"
+}
+
+read_containers() {
+  have podman || { printf '[]'; return; }
+  local out="" first=1 name status started
+  while IFS='|' read -r name status started; do
+    [ -z "$name" ] && continue
+    [ $first -eq 0 ] && out+=","
+    first=0
+    out+=$(printf '{"name":%s,"status":%s,"startedAt":%s}' "$(jstr "$name")" "$(jstr "$status")" "$(jstr "$started")")
+  done < <(podman ps --all --filter "label=io.podman.compose.project=perch" \
+             --format '{{.Names}}|{{.Status}}|{{.StartedAt}}' 2>/dev/null)
+  # podman-compose has used more than one project label over the years; fall
+  # back to matching the names perch gives its own containers.
+  if [ -z "$out" ]; then
+    first=1
+    while IFS='|' read -r name status started; do
+      [ -z "$name" ] && continue
+      # Only this project's own containers. podman-compose names them after
+      # the project directory, so both services carry "perch" in the name —
+      # matching a bare "ollama" here would report somebody else's container
+      # as ours.
+      case "$name" in *perch*) ;; *) continue ;; esac
+      [ $first -eq 0 ] && out+=","
+      first=0
+      out+=$(printf '{"name":%s,"status":%s,"startedAt":%s}' "$(jstr "$name")" "$(jstr "$status")" "$(jstr "$started")")
+    done < <(podman ps --all --format '{{.Names}}|{{.Status}}|{{.StartedAt}}' 2>/dev/null)
+  fi
+  printf '[%s]' "$out"
+}
+
+unit_state() {
+  # active/inactive/failed plus whether it starts at boot, for one unit.
+  local unit="$1" active enabled since
+  active=$(systemctl is-active "$unit" 2>/dev/null || true)
+  enabled=$(systemctl is-enabled "$unit" 2>/dev/null || true)
+  since=$(systemctl show "$unit" -p ActiveEnterTimestamp --value 2>/dev/null || true)
+  printf '{"unit":%s,"active":%s,"enabled":%s,"since":%s}' \
+    "$(jstr "$unit")" "$(jstr "${active:-unknown}")" "$(jstr "${enabled:-unknown}")" "$(jstr "$since")"
+}
+
+write_status() {
+  local tmp="$STATUS.tmp"
+  {
+    printf '{'
+    printf '"at":%s,' "$(jstr "$(date -Is)")"
+    printf '"hostname":%s,' "$(jstr "$(hostname 2>/dev/null)")"
+    printf '"kernel":%s,' "$(jstr "$(uname -r 2>/dev/null)")"
+    printf '"uptimeSeconds":%s,' "$(jnum "$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null)")"
+    printf '"mem":%s,' "$(read_mem)"
+    printf '"cpu":%s,' "$(read_cpu)"
+    printf '"gpus":%s,' "$(read_gpu)"
+    printf '"disk":%s,' "$(read_disk "$STATE_DIR")"
+    printf '"containers":%s,' "$(read_containers)"
+    printf '"boot":%s,' "$(unit_state perch.service)"
+    printf '"tunnel":%s,' "$(unit_state perch-tunnel.service)"
+    printf '"hostd":{"version":"0.1.0","interval":%s}' "$(jnum "$INTERVAL")"
+    printf '}\n'
+  } > "$tmp" 2>/dev/null
+  mv -f "$tmp" "$STATUS" 2>/dev/null && chmod 644 "$STATUS" 2>/dev/null
+}
+
+# ---------- actions ----------
+
+# Only these names do anything. Anything else is refused and logged.
+run_action() {
+  local action="$1" arg="${2-}"
+  case "$action" in
+    containers.start)    compose up -d ;;
+    containers.stop)     compose down ;;
+    containers.restart)
+      case "$arg" in
+        ''|all)      compose restart ;;
+        perch|ollama) compose restart "$arg" ;;
+        *)           echo "unknown service: $arg"; return 2 ;;
+      esac ;;
+    containers.pull)     compose pull ;;
+    boot.enable)         systemctl enable perch.service 2>&1 ;;
+    boot.disable)        systemctl disable perch.service 2>&1 ;;
+    tunnel.start)        systemctl start perch-tunnel.service 2>&1 ;;
+    tunnel.stop)         systemctl stop perch-tunnel.service 2>&1 ;;
+    tunnel.restart)      systemctl restart perch-tunnel.service 2>&1 ;;
+    tunnel.enable)       systemctl enable --now perch-tunnel.service 2>&1 ;;
+    tunnel.disable)      systemctl disable --now perch-tunnel.service 2>&1 ;;
+    tunnel.logs)         journalctl -u perch-tunnel.service -n 100 --no-pager 2>&1 ;;
+    tunnel.keygen)       do_keygen ;;
+    tunnel.configure)    do_tunnel_configure ;;
+    logs)
+      case "$arg" in
+        perch|ollama)    compose logs --tail=200 "$arg" ;;
+        *)               echo "unknown service: $arg"; return 2 ;;
+      esac ;;
+    env.set)             do_env_set "$arg" ;;
+    daemon.reload)       systemctl daemon-reload 2>&1 ;;
+    *)
+      echo "refused: $action is not an action perch-hostd performs"
+      return 2 ;;
+  esac
+}
+
+# A dedicated key for the tunnel, generated on this box and never leaving it.
+do_keygen() {
+  local dir="$STATE_DIR/ssh" key="$STATE_DIR/ssh/id_ed25519"
+  mkdir -p "$dir"; chmod 700 "$dir"
+  if [ -f "$key" ]; then echo "key already exists at $key"; cat "$key.pub"; return 0; fi
+  ssh-keygen -t ed25519 -N '' -C "perch@$(hostname 2>/dev/null || echo host)" -f "$key" >/dev/null 2>&1 || {
+    echo "ssh-keygen failed"; return 1; }
+  chmod 600 "$key"; chmod 644 "$key.pub"
+  # The tunnel runs unprivileged, so the key it opens has to be readable by
+  # that account and by nothing else.
+  if id "$TUNNEL_USER" >/dev/null 2>&1; then
+    chown -R "$TUNNEL_USER" "$dir" 2>/dev/null || true
+    touch "$dir/known_hosts"; chown "$TUNNEL_USER" "$dir/known_hosts" 2>/dev/null || true
+    chmod 600 "$dir/known_hosts" 2>/dev/null || true
+  fi
+  cat "$key.pub"
+}
+
+# Rewrite the tunnel unit from the settings the console saved, then reload
+# systemd and restart the tunnel if it was already running.
+#
+# The console writes tunnel.conf rather than passing these as arguments: they
+# are six related values that must be validated together, and a config file
+# both sides can read beats six chances to get an argument wrong.
+do_tunnel_configure() {
+  local conf="$STATE_DIR/tunnel.conf" tmpl="$PERCH_DIR/deploy/perch-tunnel.service.tmpl"
+  local unit=/etc/systemd/system/perch-tunnel.service
+  [ -f "$conf" ] || { echo "no tunnel.conf yet"; return 1; }
+  [ -f "$tmpl" ] || { echo "missing $tmpl"; return 1; }
+  local HOST="" USER="" SSH_PORT="" REMOTE_BIND="" REMOTE_PORT="" LOCAL_PORT=""
+  while IFS='=' read -r k v; do
+    case "$k" in
+      HOST) HOST="$v" ;; USER) USER="$v" ;; SSH_PORT) SSH_PORT="$v" ;;
+      REMOTE_BIND) REMOTE_BIND="$v" ;; REMOTE_PORT) REMOTE_PORT="$v" ;; LOCAL_PORT) LOCAL_PORT="$v" ;;
+    esac
+  done < "$conf"
+
+  # Validated here as well as in the console, because this is the side that
+  # writes a root-owned unit file and runs what is in it.
+  [[ $HOST =~ ^[A-Za-z0-9._-]{1,253}$ ]] || { echo "bad host"; return 2; }
+  [[ $USER =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || { echo "bad user"; return 2; }
+  [[ $SSH_PORT =~ ^[0-9]{1,5}$ ]] || { echo "bad ssh port"; return 2; }
+  [[ $REMOTE_PORT =~ ^[0-9]{1,5}$ ]] || { echo "bad remote port"; return 2; }
+  [[ $LOCAL_PORT =~ ^[0-9]{1,5}$ ]] || { echo "bad local port"; return 2; }
+  [[ $REMOTE_BIND =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo "bad remote bind"; return 2; }
+  # The same rail as the far-side script: a public bind address would put the
+  # model endpoint on the internet.
+  case "$REMOTE_BIND" in
+    127.*|10.*|192.168.*|169.254.*) ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[01].*) ;;
+    *) echo "refusing to bind $REMOTE_BIND: not a private address"; return 2 ;;
+  esac
+
+  local runas="$TUNNEL_USER"
+  id "$runas" >/dev/null 2>&1 || runas=root
+  local key="$STATE_DIR/ssh/id_ed25519"
+  [ -f "$key" ] || { echo "no tunnel key yet; generate one first"; return 1; }
+
+  sed -e "s|__USER__|$USER|g" -e "s|__HOST__|$HOST|g" -e "s|__SSH_PORT__|$SSH_PORT|g" \
+      -e "s|__REMOTE_BIND__|$REMOTE_BIND|g" -e "s|__REMOTE_PORT__|$REMOTE_PORT|g" \
+      -e "s|__LOCAL_PORT__|$LOCAL_PORT|g" -e "s|__KEY_PATH__|$key|g" \
+      -e "s|__STATE_DIR__|$STATE_DIR|g" -e "s|__RUNAS__|$runas|g" \
+      "$tmpl" > "$unit" || { echo "could not write $unit"; return 1; }
+  chmod 644 "$unit"
+  systemctl daemon-reload 2>&1
+  if [ "$(systemctl is-active perch-tunnel.service 2>/dev/null)" = active ]; then
+    systemctl restart perch-tunnel.service 2>&1
+    echo "tunnel reconfigured and restarted"
+  else
+    echo "tunnel reconfigured (not running)"
+  fi
+}
+
+# Ollama's tuning knobs, written into .env so they survive a restart. Only
+# these keys, and only values of the shape each one takes — the file is read
+# by compose, so an unchecked value here would be an injection into the
+# container's environment.
+do_env_set() {
+  local key="${1%%=*}" value="${1#*=}"
+  case "$key" in
+    OLLAMA_NUM_PARALLEL|OLLAMA_MAX_LOADED_MODELS|OLLAMA_MAX_QUEUE)
+      [[ $value =~ ^[0-9]{1,4}$ ]] || { echo "bad value for $key"; return 2; } ;;
+    OLLAMA_KV_CACHE_TYPE)
+      case "$value" in f16|q8_0|q4_0) ;; *) echo "bad value for $key"; return 2 ;; esac ;;
+    OLLAMA_FLASH_ATTENTION)
+      case "$value" in 0|1) ;; *) echo "bad value for $key"; return 2 ;; esac ;;
+    OLLAMA_KEEP_ALIVE)
+      [[ $value =~ ^-?[0-9]+[smh]?$ ]] || { echo "bad value for $key"; return 2; } ;;
+    OLLAMA_MEM_LIMIT|PERCH_MAX_CONCURRENT)
+      [[ $value =~ ^[0-9]+[mg]?$ ]] || { echo "bad value for $key"; return 2; } ;;
+    *) echo "refused: $key is not a settable key"; return 2 ;;
+  esac
+  local env_file="$PERCH_DIR/.env"
+  [ -f "$env_file" ] || { echo "no .env at $env_file"; return 1; }
+  if grep -q "^$key=" "$env_file" 2>/dev/null; then
+    sed -i "s|^$key=.*|$key=$value|" "$env_file"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$env_file"
+  fi
+  echo "set $key=$value (restart to apply)"
+}
+
+process_requests() {
+  local f id action arg out rc
+  for f in "$REQ_DIR"/*.req; do
+    [ -e "$f" ] || continue
+    id=$(basename "$f" .req)
+    # An id has to look like an id: it becomes a filename in the results
+    # directory, and "../" in it would be a path traversal handed to root.
+    if ! [[ $id =~ ^[A-Za-z0-9_-]{6,64}$ ]]; then log "bad request id, dropping"; rm -f "$f"; continue; fi
+    action=""; arg=""
+    while IFS='=' read -r k v; do
+      case "$k" in action) action="$v" ;; arg) arg="$v" ;; esac
+    done < "$f"
+    rm -f "$f"
+    # Actions and arguments are drawn from a fixed vocabulary; anything with a
+    # shell metacharacter in it never had a chance of being valid.
+    if ! [[ $action =~ ^[a-z]+(\.[a-z]+)?$ ]]; then
+      printf '{"id":%s,"ok":false,"code":2,"output":"malformed action"}\n' "$(jstr "$id")" > "$RES_DIR/$id.json"
+      continue
+    fi
+    if [ -n "$arg" ] && ! [[ $arg =~ ^[A-Za-z0-9_=.:/-]{0,120}$ ]]; then
+      printf '{"id":%s,"ok":false,"code":2,"output":"malformed argument"}\n' "$(jstr "$id")" > "$RES_DIR/$id.json"
+      continue
+    fi
+    log "action $action ${arg:+($arg)}"
+    out=$(run_action "$action" "$arg" 2>&1); rc=$?
+    out=$(printf '%s' "$out" | tr -d '\000-\010\013\014\016-\037' | tail -c 60000)
+    printf '{"id":%s,"ok":%s,"code":%s,"at":%s,"output":%s}\n' \
+      "$(jstr "$id")" "$([ $rc -eq 0 ] && echo true || echo false)" "$rc" "$(jstr "$(date -Is)")" "$(jstr "$out")" \
+      > "$RES_DIR/$id.json"
+    chmod 644 "$RES_DIR/$id.json" 2>/dev/null
+  done
+  # Results are picked up within a second or two; anything still here after a
+  # couple of minutes was abandoned.
+  find "$RES_DIR" -type f -mmin +2 -delete 2>/dev/null || true
+}
+
+log "started (state=$STATE_DIR project=$PERCH_DIR interval=${INTERVAL}s)"
+trap 'log "stopping"; exit 0' TERM INT
+
+while true; do
+  write_status
+  process_requests
+  sleep "$INTERVAL"
+done

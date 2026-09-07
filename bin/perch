@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# Operator wrapper around podman-compose for a perch install.
+#   ./bin/perch up | down | restart [service] | ps | logs [service] | build
+#   ./bin/perch status               a summary of everything, in one screen
+#   ./bin/perch token [name]         mint an API token for Tern
+#   ./bin/perch console-password     set (or clear) the console password
+#   ./bin/perch pull-model <name>    download a model
+#   ./bin/perch models               what is installed and what is loaded
+#   ./bin/perch tunnel <start|stop|restart|status|logs|enable|disable>
+#   ./bin/perch boot <on|off>        start perch when this machine boots
+#   ./bin/perch hostd-install        (re)install the host helper unit
+#   ./bin/perch doctor               check the things that usually go wrong
+#   ./bin/perch update               pull, rebuild and restart
+#   ./bin/perch compose <args>       raw podman-compose with the right files
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+[ -f .env ] || { echo "No .env yet; run sudo ./install.sh first." >&2; exit 1; }
+# .env is root-only (mode 600), so become root before reading it.
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null; then exec sudo -E "$0" "$@"; fi
+# shellcheck disable=SC1091
+set -a; . ./.env; set +a
+export COMPOSE_FILE="${COMPOSE_FILE:-compose.yml}"
+
+if command -v podman-compose >/dev/null 2>&1; then COMPOSE_CMD="podman-compose"
+else COMPOSE_CMD="podman compose"; fi
+compose() { $COMPOSE_CMD --env-file "$ROOT/.env" "$@"; }
+
+CONSOLE="http://127.0.0.1:${PERCH_CONSOLE_PORT:-8099}"
+ENDPOINT="http://127.0.0.1:${PERCH_PROXY_PORT:-11434}"
+
+if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; C=$'\e[36m'; N=$'\e[0m'
+else B=; D=; G=; Y=; R=; C=; N=; fi
+ok()   { printf '  %s✓%s %s\n' "$G" "$N" "$*"; }
+bad()  { printf '  %s✗%s %s\n' "$R" "$N" "$*"; }
+warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
+note() { printf '  %s%s%s\n' "$D" "$*" "$N"; }
+head_() { printf '\n%s%s%s\n' "$B" "$*" "$N"; }
+
+# A field out of a JSON object, without needing jq installed.
+jget() { sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p" | head -1; }
+jnum() { sed -n "s/.*\"$1\":\\([0-9.]*\\).*/\\1/p" | head -1; }
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  up)        compose up -d "$@" ;;
+  down)      compose down "$@" ;;
+  restart)   compose restart "$@" ;;
+  ps)        compose ps "$@" ;;
+  build)     compose build perch "$@" ;;
+  compose)   compose "$@" ;;
+  logs)
+    if [ -t 1 ]; then compose logs -f --tail=200 "$@"; else compose logs --tail=200 "$@"; fi ;;
+
+  token)
+    name="${1:-Tern}"
+    out=$(curl -fsS --max-time 10 -X POST "$CONSOLE/api/tokens" -H 'Content-Type: application/json' \
+      -d "{\"name\":\"$name\",\"scopes\":[\"use\",\"manage\"]}") || { bad "the console is not answering at $CONSOLE"; exit 1; }
+    tok=$(printf '%s' "$out" | jget token)
+    printf '\n  %s%s%s\n\n' "$C" "$tok" "$N"
+    note "shown once — perch keeps a hash, not the token." ;;
+
+  console-password)
+    printf 'A password lets you open the console from another machine on your own\n'
+    printf 'network. Leave it blank to clear it, which restricts the console to this\n'
+    printf 'machine only.\n\n'
+    read -r -s -p "  New console password: " pw; echo
+    if [ -z "$pw" ]; then
+      curl -fsS -X POST "$CONSOLE/api/console-password" -H 'Content-Type: application/json' -d '{"password":null}' >/dev/null \
+        && ok "password cleared; the console now answers only on this machine"
+    else
+      [ "${#pw}" -ge 10 ] || { bad "use at least 10 characters."; exit 1; }
+      read -r -s -p "  Again: " pw2; echo
+      [ "$pw" = "$pw2" ] || { bad "those did not match."; exit 1; }
+      # Sent over loopback to the console, which stores only a scrypt hash.
+      python3 -c 'import json,sys;print(json.dumps({"password":sys.argv[1]}))' "$pw" \
+        | curl -fsS -X POST "$CONSOLE/api/console-password" -H 'Content-Type: application/json' -d @- >/dev/null \
+        && ok "password set"
+    fi ;;
+
+  pull-model)
+    [ $# -ge 1 ] || { bad "which model? e.g. ./bin/perch pull-model qwen2.5:7b"; exit 1; }
+    compose exec -T ollama ollama pull "$1" ;;
+
+  models)
+    head_ "Installed"
+    compose exec -T ollama ollama list
+    head_ "In memory"
+    compose exec -T ollama ollama ps ;;
+
+  tunnel)
+    action="${1:-status}"
+    case "$action" in
+      start|stop|restart)  systemctl "$action" perch-tunnel.service && ok "tunnel ${action}ed" ;;
+      enable)              systemctl enable --now perch-tunnel.service && ok "the tunnel will start at boot" ;;
+      disable)             systemctl disable --now perch-tunnel.service && ok "the tunnel will not start at boot" ;;
+      logs)                journalctl -u perch-tunnel.service -n 100 --no-pager ;;
+      status)              systemctl status perch-tunnel.service --no-pager || true ;;
+      *) bad "start, stop, restart, enable, disable, logs or status"; exit 2 ;;
+    esac ;;
+
+  boot)
+    case "${1:-}" in
+      on)  systemctl enable perch.service >/dev/null && ok "perch will start at boot" ;;
+      off) systemctl disable perch.service >/dev/null && ok "perch will not start at boot" ;;
+      *)   printf '  %s\n' "$(systemctl is-enabled perch.service 2>/dev/null || echo 'not installed')" ;;
+    esac ;;
+
+  hostd-install)
+    sed -e "s|__PERCH_DIR__|$ROOT|g" -e "s|__STATE_DIR__|${PERCH_STATE_DIR:-/var/lib/perch}|g" \
+        -e "s|__PERCH_UID__|1000|g" -e "s|__PERCH_GID__|1000|g" \
+        deploy/perch-hostd.service.tmpl > /etc/systemd/system/perch-hostd.service
+    systemctl daemon-reload
+    systemctl enable --now perch-hostd.service
+    ok "the host helper is installed and running" ;;
+
+  status)
+    head_ "perch"
+    if curl -fsS --max-time 3 "$ENDPOINT/healthz" >/dev/null 2>&1; then ok "model endpoint answering on $ENDPOINT"
+    else bad "model endpoint is not answering on $ENDPOINT"; fi
+    if curl -fsS --max-time 3 "$CONSOLE/api/session" >/dev/null 2>&1; then ok "console on $CONSOLE"
+    else bad "console is not answering on $CONSOLE"; fi
+
+    head_ "Containers"
+    compose ps 2>/dev/null || warn "podman-compose could not list them"
+
+    head_ "Tunnel"
+    if systemctl list-unit-files perch-tunnel.service >/dev/null 2>&1 \
+       && [ -f /etc/systemd/system/perch-tunnel.service ]; then
+      a=$(systemctl is-active perch-tunnel.service 2>/dev/null || true)
+      e=$(systemctl is-enabled perch-tunnel.service 2>/dev/null || true)
+      [ "$a" = active ] && ok "running" || bad "$a"
+      [ "$e" = enabled ] && ok "starts at boot" || note "does not start at boot"
+    else
+      note "not set up yet — open the console and go to Connect"
+    fi
+
+    head_ "Host helper"
+    if systemctl is-active perch-hostd.service >/dev/null 2>&1; then ok "running"
+    else bad "not running (./bin/perch hostd-install)"; fi ;;
+
+  doctor)
+    fail=0
+    head_ "The things that usually go wrong"
+
+    if curl -fsS --max-time 3 "$ENDPOINT/healthz" >/dev/null 2>&1; then ok "the model endpoint is listening"
+    else bad "the model endpoint is not listening — the containers may be down (./bin/perch up)"; fail=1; fi
+
+    if compose exec -T ollama ollama list >/dev/null 2>&1; then ok "Ollama answers"
+    else bad "Ollama is not answering (./bin/perch logs ollama)"; fail=1; fi
+
+    if compose exec -T ollama ollama list 2>/dev/null | tail -n +2 | grep -q .; then ok "at least one model is downloaded"
+    else warn "no models yet — download one in the console, or ./bin/perch pull-model qwen2.5:7b"; fi
+
+    if [ -f "${PERCH_STATE_DIR:-/var/lib/perch}/ssh/id_ed25519" ]; then ok "the tunnel key exists"
+    else warn "no tunnel key yet — generate one in the console under Connect"; fi
+
+    if systemctl is-active perch-hostd.service >/dev/null 2>&1; then ok "the host helper is running"
+    else bad "the host helper is not running, so the console cannot see the GPU or drive the tunnel"; fail=1; fi
+
+    if [ -f /etc/systemd/system/perch-tunnel.service ]; then
+      if systemctl is-active perch-tunnel.service >/dev/null 2>&1; then
+        ok "the tunnel is up"
+      else
+        bad "the tunnel is configured but not running"
+        note "last few lines:"
+        journalctl -u perch-tunnel.service -n 5 --no-pager 2>/dev/null | sed 's/^/    /'
+        fail=1
+      fi
+    else
+      warn "the tunnel is not configured yet"
+    fi
+
+    # A GPU that is present but not visible to the container is the single
+    # most common "why is this so slow" cause.
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      if compose exec -T ollama nvidia-smi -L >/dev/null 2>&1; then ok "Ollama can see the GPU"
+      else bad "this machine has an NVIDIA GPU but the container cannot see it — the model is running on the CPU"
+           note "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml, then ./bin/perch restart"
+           fail=1; fi
+    fi
+
+    echo
+    [ "$fail" = 0 ] && ok "nothing obviously wrong" || warn "see above"
+    exit "$fail" ;;
+
+  update)  exec "$ROOT/update.sh" ;;
+
+  help|--help|-h|*)
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

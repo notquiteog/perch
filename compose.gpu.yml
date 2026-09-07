@@ -1,0 +1,12 @@
+# Optional overlay: hand an NVIDIA GPU to Ollama.
+#
+# Needs the NVIDIA container toolkit with CDI configured:
+#   sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+#
+# install.sh adds this file to COMPOSE_FILE when it finds a working GPU.
+services:
+  ollama:
+    devices:
+      - nvidia.com/gpu=all
+    security_opt:
+      - label=disable

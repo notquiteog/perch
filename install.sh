@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+# =============================================================================
+# perch installer. Safe to run again: every answer you gave last time is the
+# default next time, and nothing is rebuilt or restarted unless it changed.
+#
+#   sudo ./install.sh              walk through it
+#   sudo ./install.sh --yes        take the defaults, no questions
+#   sudo ./install.sh --no-build   skip the container build
+#   sudo ./install.sh --help
+# =============================================================================
+set -euo pipefail
+
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$INSTALL_DIR"
+ENV_FILE="$INSTALL_DIR/.env"
+NONINTERACTIVE=0
+SKIP_BUILD=0
+for a in "$@"; do
+  case "$a" in
+    --yes|-y) NONINTERACTIVE=1 ;;
+    --no-build) SKIP_BUILD=1 ;;
+    --help|-h) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  esac
+done
+
+if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; C=$'\e[36m'; N=$'\e[0m'
+else B=; D=; G=; Y=; R=; C=; N=; fi
+say()  { printf '%s\n' "$*"; }
+step() { printf '\n%s==>%s %s%s%s\n' "$C" "$N" "$B" "$*" "$N"; }
+ok()   { printf '  %s✓%s %s\n' "$G" "$N" "$*"; }
+warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
+die()  { printf '  %s✗ %s%s\n' "$R" "$*" "$N" >&2; exit 1; }
+note() { printf '  %s%s%s\n' "$D" "$*" "$N"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+ask() {
+  local var="$1" prompt="$2" def="${3:-}" cur="${!1:-}" ans
+  [ -n "$cur" ] && def="$cur"
+  if [ "$NONINTERACTIVE" = 1 ]; then printf -v "$var" '%s' "$def"; return; fi
+  if [ -n "$def" ]; then read -r -p "  $prompt [$def]: " ans || true
+  else read -r -p "  $prompt: " ans || true; fi
+  printf -v "$var" '%s' "${ans:-$def}"
+}
+ask_yn() {
+  local var="$1" prompt="$2" def="${3:-y}" ans
+  if [ "$NONINTERACTIVE" = 1 ]; then printf -v "$var" '%s' "$def"; return; fi
+  read -r -p "  $prompt [$( [ "$def" = y ] && echo 'Y/n' || echo 'y/N')]: " ans || true
+  ans="${ans:-$def}"
+  case "$ans" in [Yy]*) printf -v "$var" 'y' ;; *) printf -v "$var" 'n' ;; esac
+}
+
+[ "$(id -u)" -eq 0 ] || die "run this with sudo — it installs systemd units and creates a service account."
+
+printf '\n%s  perch%s  %sa perch for your model%s\n' "$B" "$N" "$D" "$N"
+
+# ---------- 1. what is already here ----------
+step "Checking this machine"
+have podman || die "podman is not installed. On Debian/Ubuntu: apt install podman"
+ok "podman $(podman --version | awk '{print $3}')"
+if have podman-compose; then COMPOSE_CMD="podman-compose"
+elif podman compose version >/dev/null 2>&1; then COMPOSE_CMD="podman compose"
+else die "neither podman-compose nor 'podman compose' is available. On Debian/Ubuntu: apt install podman-compose"; fi
+ok "using $COMPOSE_CMD"
+have ssh || die "the openssh client is not installed; the tunnel needs it. apt install openssh-client"
+have ssh-keygen || die "ssh-keygen is missing (openssh-client)."
+ok "ssh $(ssh -V 2>&1 | awk '{print $1}')"
+have systemctl || warn "no systemd here; the tunnel and the host helper will have to be run by hand."
+
+RAM_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+RAM_GB=$(( RAM_KB / 1024 / 1024 ))
+ok "${RAM_GB} GB of memory, $(nproc) cores"
+
+# ---------- 2. the GPU ----------
+step "Looking for a GPU"
+GPU_KIND="none"; VRAM_MB=0
+if have nvidia-smi && nvidia-smi -L >/dev/null 2>&1; then
+  GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+  VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
+  GPU_KIND="nvidia"
+  ok "$GPU_NAME with ${VRAM_MB} MB"
+  if [ -f /etc/cdi/nvidia.yaml ] || [ -f /var/run/cdi/nvidia.yaml ]; then
+    ok "the NVIDIA container toolkit is configured"
+  else
+    warn "the NVIDIA container toolkit is not set up, so containers cannot see the GPU"
+    note "install it, then: sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
+    ask_yn USE_GPU_ANYWAY "Carry on without the GPU for now?" y
+    [ "$USE_GPU_ANYWAY" = y ] || die "stopping so you can set the toolkit up first."
+    GPU_KIND="none"
+  fi
+elif [ -e /dev/kfd ]; then
+  GPU_KIND="amd"
+  for f in /sys/class/drm/card*/device/mem_info_vram_total; do
+    [ -r "$f" ] && VRAM_MB=$(( $(cat "$f") / 1048576 )) && break
+  done
+  ok "an AMD GPU with ${VRAM_MB} MB (ROCm)"
+else
+  warn "no GPU found — the model will run on the CPU, which is slow but works"
+fi
+
+# ---------- 3. sizing ----------
+step "Sizing"
+if [ "$VRAM_MB" -gt 1024 ]; then USABLE_MB=$(( VRAM_MB * 9 / 10 )); BASIS="the GPU"
+else USABLE_MB=$(( RAM_KB / 1024 * 2 / 3 )); BASIS="system memory"; fi
+pick_model() {
+  local mb=$1
+  if   [ "$mb" -ge 46000 ]; then echo "llama3.3:70b"
+  elif [ "$mb" -ge 23000 ]; then echo "qwen2.5:32b"
+  elif [ "$mb" -ge 11500 ]; then echo "qwen2.5:14b"
+  elif [ "$mb" -ge 8100  ]; then echo "gemma2:9b"
+  elif [ "$mb" -ge 6200  ]; then echo "qwen2.5:7b"
+  elif [ "$mb" -ge 3400  ]; then echo "llama3.2:3b"
+  else echo "qwen2.5:1.5b"; fi
+}
+SUGGESTED_MODEL=$(pick_model "$USABLE_MB")
+note "${USABLE_MB} MB usable, judged from $BASIS"
+ok "suggested model: $SUGGESTED_MODEL"
+# One slot per ~6 GB of usable memory, because each slot costs a context
+# window of KV cache; never fewer than one, and past four the GPU is the limit
+# rather than the slot count.
+SLOTS=$(( USABLE_MB / 6000 )); [ "$SLOTS" -lt 1 ] && SLOTS=1; [ "$SLOTS" -gt 4 ] && SLOTS=4
+ok "$SLOTS request slot(s)"
+
+# ---------- 4. settings ----------
+step "Settings"
+# shellcheck disable=SC1090
+[ -f "$ENV_FILE" ] && { set -a; . "$ENV_FILE"; set +a; note "keeping what you chose last time as the defaults"; }
+
+PERCH_STATE_DIR="${PERCH_STATE_DIR:-/var/lib/perch}"
+ask PERCH_CONSOLE_PORT "Console port (on 127.0.0.1)" "${PERCH_CONSOLE_PORT:-8099}"
+ask PERCH_PROXY_PORT   "Model endpoint port (on 127.0.0.1)" "${PERCH_PROXY_PORT:-11434}"
+ask OLLAMA_NUM_PARALLEL "Requests answered at once" "${OLLAMA_NUM_PARALLEL:-$SLOTS}"
+ask AI_MODEL "Model to download now (blank to choose later in the console)" "${AI_MODEL:-$SUGGESTED_MODEL}"
+
+COMPOSE_FILE="compose.yml"
+case "$GPU_KIND" in
+  nvidia) COMPOSE_FILE="compose.yml:compose.gpu.yml" ;;
+  amd)    COMPOSE_FILE="compose.yml:compose.rocm.yml" ;;
+esac
+ok "compose overlays: $COMPOSE_FILE"
+
+# ---------- 5. the service account ----------
+step "The tunnel account on this machine"
+# The tunnel runs unprivileged. Only this account can read the key.
+if id perch >/dev/null 2>&1; then
+  ok "the perch account already exists"
+else
+  useradd --system --no-create-home --home-dir "$PERCH_STATE_DIR" --shell /usr/sbin/nologin perch 2>/dev/null \
+    || useradd --system --no-create-home --home-dir "$PERCH_STATE_DIR" --shell /sbin/nologin perch
+  ok "created the perch account (no shell, no password)"
+fi
+
+# ---------- 6. the state directory ----------
+step "State"
+install -d -m 750 "$PERCH_STATE_DIR"
+install -d -m 700 "$PERCH_STATE_DIR/ssh"
+install -d -m 755 "$PERCH_STATE_DIR/host"
+install -d -m 733 "$PERCH_STATE_DIR/host/requests"
+install -d -m 755 "$PERCH_STATE_DIR/host/results"
+# The container runs as uid 1000; the host helper runs as root. Both need the
+# directory, so it belongs to 1000 with the perch account's group.
+chown -R 1000:1000 "$PERCH_STATE_DIR" 2>/dev/null || true
+chown -R perch "$PERCH_STATE_DIR/ssh" 2>/dev/null || true
+ok "$PERCH_STATE_DIR"
+
+# ---------- 7. .env ----------
+step "Writing .env"
+cat > "$ENV_FILE" <<EOF
+# Written by install.sh. Run it again to change any of this; it keeps your
+# answers as the defaults.
+
+# Where the console and the model endpoint listen. Both on 127.0.0.1 — the
+# tunnel picks the endpoint up from there, and nothing needs a router change.
+PERCH_CONSOLE_PORT=$PERCH_CONSOLE_PORT
+PERCH_PROXY_PORT=$PERCH_PROXY_PORT
+PERCH_STATE_DIR=$PERCH_STATE_DIR
+PERCH_MAX_CONCURRENT=$(( OLLAMA_NUM_PARALLEL + 2 ))
+PERCH_LOG_LEVEL=info
+PERCH_VERSION=0.1.0
+
+# Ollama. These are read when it starts, so change them here (or in the
+# console) and restart.
+OLLAMA_NUM_PARALLEL=$OLLAMA_NUM_PARALLEL
+OLLAMA_MAX_LOADED_MODELS=1
+OLLAMA_FLASH_ATTENTION=1
+OLLAMA_KV_CACHE_TYPE=q8_0
+OLLAMA_MAX_QUEUE=32
+OLLAMA_KEEP_ALIVE=10m
+
+# The model install.sh downloaded, for reference. The console is where you
+# change which one is in use.
+AI_MODEL=$AI_MODEL
+
+# Compose overlays, colon separated.
+COMPOSE_FILE=$COMPOSE_FILE
+EOF
+chmod 600 "$ENV_FILE"
+ok "$ENV_FILE"
+
+# ---------- 8. systemd ----------
+step "systemd units"
+render() {
+  sed -e "s|__PERCH_DIR__|$INSTALL_DIR|g" -e "s|__STATE_DIR__|$PERCH_STATE_DIR|g" \
+      -e "s|__PERCH_UID__|1000|g" -e "s|__PERCH_GID__|1000|g" "$1" > "$2"
+  chmod 644 "$2"
+}
+if have systemctl; then
+  render deploy/perch-hostd.service.tmpl /etc/systemd/system/perch-hostd.service
+  render deploy/perch.service.tmpl /etc/systemd/system/perch.service
+  systemctl daemon-reload
+  systemctl enable --now perch-hostd.service >/dev/null 2>&1 && ok "perch-hostd is running" \
+    || warn "perch-hostd did not start; see: journalctl -u perch-hostd"
+  ask_yn BOOT "Start perch when this machine boots?" y
+  if [ "$BOOT" = y ]; then systemctl enable perch.service >/dev/null 2>&1 && ok "it will start at boot"
+  else systemctl disable perch.service >/dev/null 2>&1 || true; note "it will not start at boot"; fi
+else
+  warn "no systemd; skipping the host helper and the boot unit"
+fi
+
+# ---------- 9. build and start ----------
+step "Containers"
+export COMPOSE_FILE
+compose() { $COMPOSE_CMD --env-file "$ENV_FILE" "$@"; }
+if [ "$SKIP_BUILD" = 0 ]; then
+  note "building the perch image (a minute or two the first time)"
+  compose build perch >/dev/null || die "the build failed. Run: $COMPOSE_CMD build perch"
+  ok "image built"
+fi
+compose up -d || die "could not start the containers. Run: $COMPOSE_CMD up -d"
+ok "containers started"
+
+printf '  waiting for perch to answer'
+for _ in $(seq 1 30); do
+  if curl -fsS --max-time 2 "http://127.0.0.1:$PERCH_PROXY_PORT/healthz" >/dev/null 2>&1; then READY=1; break; fi
+  printf '.'; sleep 1
+done
+printf '\n'
+[ "${READY:-0}" = 1 ] && ok "perch is up" || warn "perch is not answering yet; check ./bin/perch logs perch"
+
+# ---------- 10. the model ----------
+if [ -n "$AI_MODEL" ]; then
+  step "Downloading $AI_MODEL"
+  note "this is a few gigabytes and takes as long as your line takes"
+  compose exec -T ollama ollama pull "$AI_MODEL" || warn "the download did not finish; you can retry from the console"
+fi
+
+# ---------- 11. a token ----------
+step "A token for Tern"
+TOKEN_JSON=$(curl -fsS --max-time 10 -X POST "http://127.0.0.1:$PERCH_CONSOLE_PORT/api/tokens" \
+  -H 'Content-Type: application/json' -d '{"name":"Tern","scopes":["use","manage"]}' 2>/dev/null || true)
+TOKEN=$(printf '%s' "$TOKEN_JSON" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+
+cat <<EOF
+
+$B  perch is installed.$N
+
+  Console        ${C}http://127.0.0.1:$PERCH_CONSOLE_PORT${N}
+  Model endpoint 127.0.0.1:$PERCH_PROXY_PORT  ${D}(loopback only, for the tunnel)${N}
+EOF
+if [ -n "$TOKEN" ]; then
+  cat <<EOF
+
+  A token for Tern — copy it now, it is not shown again:
+
+    ${C}$TOKEN${N}
+EOF
+else
+  note "make a token in the console under Settings."
+fi
+cat <<EOF
+
+  ${B}Next:${N} open the console and go to ${B}Connect${N}. It walks through
+  generating a key, authorising it on the box Tern runs on, starting the
+  tunnel, and gives you the two settings Tern needs.
+
+  ${D}./bin/perch help   for everything you can do from a terminal${D}${N}
+
+EOF

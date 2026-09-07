@@ -1,0 +1,29 @@
+# The host-side helper: publishes GPU and memory telemetry the container
+# cannot see, and performs the small fixed list of podman and systemd actions
+# the console is allowed to ask for. See deploy/perch-hostd for the list.
+[Unit]
+Description=perch host helper (telemetry and container control)
+Documentation=https://github.com/notquiteog/perch/blob/main/docs/ARCHITECTURE.md
+After=network.target
+
+[Service]
+Type=simple
+# Root, because starting containers and enabling units is the job. The reason
+# this is a separate process at all is so that the container — and therefore
+# the internet-facing proxy inside it — never needs these privileges.
+User=root
+Environment=PERCH_DIR=__PERCH_DIR__
+Environment=PERCH_STATE_DIR=__STATE_DIR__
+Environment=PERCH_UID=__PERCH_UID__
+Environment=PERCH_GID=__PERCH_GID__
+ExecStart=__PERCH_DIR__/deploy/perch-hostd
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=0
+
+NoNewPrivileges=yes
+ProtectHome=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

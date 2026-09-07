@@ -1,0 +1,21 @@
+# Start perch's containers at boot. Enabled and disabled from the console's
+# Containers panel, or with `./bin/perch boot on|off`.
+[Unit]
+Description=perch (self-hosted model host for Tern)
+Documentation=https://github.com/notquiteog/perch
+After=network-online.target
+Wants=network-online.target
+# podman's own socket is not required, but on a machine that has it the
+# ordering avoids a race on boot.
+After=podman.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=__PERCH_DIR__
+ExecStart=__PERCH_DIR__/bin/perch up
+ExecStop=__PERCH_DIR__/bin/perch down
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

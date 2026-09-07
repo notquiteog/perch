@@ -1,0 +1,18 @@
+{
+  "name": "perch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A perch for your model: a self-hosted, authenticated Ollama host you run on the machine with the GPU, and point Tern at over an SSH tunnel or a forwarded port.",
+  "license": "AGPL-3.0-or-later",
+  "repository": { "type": "git", "url": "https://github.com/notquiteog/perch.git" },
+  "workspaces": ["server", "client"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev:server": "npm run dev -w server",
+    "dev:client": "npm run dev -w client",
+    "build": "npm run build -w client && npm run build -w server",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w client",
+    "test": "npm test -w server",
+    "start": "node server/dist/index.js"
+  }
+}

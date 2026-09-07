@@ -1,0 +1,74 @@
+# The SSH reverse tunnel that carries the model endpoint to the machine Tern
+# runs on. install.sh fills in the placeholders and writes this to
+# /etc/systemd/system/perch-tunnel.service.
+#
+# The direction matters: this box dials out. Nothing listens for the internet
+# on your home connection, no port is forwarded on your router, and the model
+# endpoint never exists on any interface but loopback at either end.
+[Unit]
+Description=perch reverse tunnel to the Tern host (__USER__@__HOST__)
+Documentation=https://github.com/notquiteog/perch/blob/main/docs/REMOTE.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__RUNAS__
+Group=__RUNAS__
+
+# -N: ask for no command, only the forward. -T: no terminal.
+#
+# ExitOnForwardFailure is the option that makes this reliable rather than
+# merely usually-working. Without it, ssh happily stays connected when the
+# remote port cannot be bound — which is exactly what happens when a previous
+# tunnel's listener has not been reaped yet — and you get a live SSH session
+# carrying nothing while Tern reports that the model is down. With it, ssh
+# exits, systemd restarts it, and the forward is retried until it takes.
+#
+# ServerAlive* is the other half: a home connection drops without telling
+# anyone, and TCP alone will sit on a dead socket for hours. Three missed
+# probes at thirty seconds means a dead tunnel is noticed within 90 seconds
+# and restarted, rather than at whatever time you next try to write an email.
+ExecStart=/usr/bin/ssh -NT \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o TCPKeepAlive=yes \
+  -o IdentitiesOnly=yes \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=accept-new \
+  -o UserKnownHostsFile=__STATE_DIR__/ssh/known_hosts \
+  -o ConnectTimeout=15 \
+  -i __KEY_PATH__ \
+  -p __SSH_PORT__ \
+  -R __REMOTE_BIND__:__REMOTE_PORT__:127.0.0.1:__LOCAL_PORT__ \
+  __USER__@__HOST__
+
+Restart=always
+RestartSec=5
+# A home connection can be down for a long time — an ISP outage, a router
+# reboot, a laptop lid. systemd's default is to give up after five restarts in
+# ten seconds and stay given up; that would mean coming home to a tunnel that
+# stopped trying hours ago. Retry forever instead.
+StartLimitIntervalSec=0
+
+# The tunnel needs one private key and a network socket. Nothing else on this
+# machine is any of its business.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=__STATE_DIR__/ssh
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

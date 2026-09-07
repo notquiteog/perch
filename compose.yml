@@ -1,0 +1,77 @@
+# perch: Ollama, and the authenticated endpoint in front of it.
+#
+# Two things to notice about the ports.
+#
+# First, Ollama publishes none. It has no authentication of its own, so the
+# only way to it is through perch, and there is no unauthenticated back door
+# on the LAN for anything else on your network to find.
+#
+# Second, perch publishes both of its ports on 127.0.0.1 only. The model
+# endpoint does not need to exist on any other interface: the SSH tunnel runs
+# on this machine and picks it up from loopback. Nothing here asks you to open
+# a port on your router.
+services:
+  ollama:
+    image: ${OLLAMA_IMAGE:-docker.io/ollama/ollama:latest}
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-10m}
+      # How many requests are answered at once. Each slot holds its own
+      # context window of KV cache, so this is a memory decision as much as a
+      # speed one; install.sh sizes it from the GPU.
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-2}
+      # One model resident at a time. Ollama's own default is three, which on
+      # a single-GPU box means two models nobody is using are holding the
+      # memory the one in use needs.
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      OLLAMA_FLASH_ATTENTION: ${OLLAMA_FLASH_ATTENTION:-1}
+      # Halves what each slot's context costs at close to no quality cost,
+      # which is what makes several slots affordable. Needs flash attention.
+      OLLAMA_KV_CACHE_TYPE: ${OLLAMA_KV_CACHE_TYPE:-q8_0}
+      # Ollama's own queue once every slot is busy. The default of 512 is deep
+      # enough that a loaded box looks like a hung spinner for minutes.
+      OLLAMA_MAX_QUEUE: ${OLLAMA_MAX_QUEUE:-32}
+    volumes:
+      - perch-models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  perch:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: localhost/perch:latest
+    restart: unless-stopped
+    environment:
+      PERCH_OLLAMA_URL: http://ollama:11434
+      PERCH_VERSION: ${PERCH_VERSION:-0.1.0}
+      # A backstop rather than a scheduler: Tern paces itself against Ollama's
+      # slot count, and this stops a runaway caller pinning the GPU.
+      PERCH_MAX_CONCURRENT: ${PERCH_MAX_CONCURRENT:-4}
+      PERCH_LOG_LEVEL: ${PERCH_LOG_LEVEL:-info}
+    ports:
+      # console
+      - "127.0.0.1:${PERCH_CONSOLE_PORT:-8099}:8099"
+      # the model endpoint the tunnel carries
+      - "127.0.0.1:${PERCH_PROXY_PORT:-11434}:11434"
+    volumes:
+      # Shared with the host helper: tokens and settings on one side,
+      # telemetry and the action channel on the other. See docs/ARCHITECTURE.md.
+      - ${PERCH_STATE_DIR:-/var/lib/perch}:/var/lib/perch:z
+    depends_on:
+      - ollama
+    healthcheck:
+      # /healthz needs no token and reports only that perch is listening.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:11434/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    mem_limit: ${PERCH_MEM_LIMIT:-256m}
+
+volumes:
+  perch-models:
