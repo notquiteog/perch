@@ -308,6 +308,57 @@ export function buildApi(): Router {
     sendJson(ctx.res, 200, { config: next, applied });
   });
 
+  // One paste, and the rest of the setup happens: save the address, rewrite
+  // the unit, start the tunnel, make a token if there is not one, and hand
+  // back the two values Tern needs. This is the step that used to be "read an
+  // IP off a terminal and retype it into five form fields".
+  r.post('/api/tunnel/pair', async (ctx) => {
+    requireConsole(ctx);
+    const body = await readJson<{ text?: string }>(ctx.req);
+    const before = loadState().tunnel;
+    if (!before.host) throw badRequest('Say where Tern runs first — perch needs the SSH host before it can pair.');
+
+    const { bind, port } = tunnel.parsePairing(body.text ?? '');
+    const config = await tunnel.saveTunnel({ remoteBind: bind, remotePort: port });
+
+    // Render the unit from the new settings, then bring it up. Already
+    // running means the address changed, so it is a restart rather than a
+    // start.
+    //
+    // None of these three is allowed to fail the pairing. The address has
+    // already been saved and is the hard-won part; if the helper is missing
+    // or systemd refuses, the right answer is to say which step failed and
+    // leave the rest in place, not to throw the address away and make
+    // somebody fetch it from the other machine again.
+    const attempt = async (a: HostAction, ms: number): Promise<{ ok: boolean; output: string }> =>
+      hostAction(a, '', ms).catch((e) => ({ ok: false, output: (e as Error).message }));
+
+    const configured = await attempt('tunnel.configure', 30_000);
+    const wasActive = (await tunnel.tunnelStatus()).active === 'active';
+    const started = await attempt(wasActive ? 'tunnel.restart' : 'tunnel.start', 60_000);
+    // A tunnel that does not come back after a reboot is the most common way
+    // this quietly stops working, so it is switched on as part of pairing.
+    const atBoot = await attempt('tunnel.enable', 30_000);
+
+    // Every install needs at least one token, and asking for it as a separate
+    // step is a step nobody would ever want to skip.
+    const existing = loadState().tokens.filter((t) => !t.revokedAt);
+    let token: string | null = null;
+    if (existing.length === 0) {
+      token = mintToken('Tern', ['use', 'manage']).token;
+    }
+
+    sendJson(ctx.res, 200, {
+      config,
+      baseUrl: tunnel.ternBaseUrl(config),
+      baseUrlLiteral: tunnel.ternBaseUrlLiteral(config),
+      token,
+      hasExistingToken: existing.length > 0,
+      status: await tunnel.tunnelStatus(),
+      steps: { configured, started, atBoot },
+    });
+  });
+
   r.post('/api/tunnel/key', async (ctx) => {
     requireConsole(ctx);
     sendJson(ctx.res, 200, { publicKey: await tunnel.generateKey() });

@@ -125,6 +125,13 @@ export const api = {
   tunnel: () => request<TunnelPage>('/api/tunnel'),
   saveTunnel: (body: Partial<TunnelConfig>) => request<{ config: TunnelConfig; applied: { ok: boolean; output: string } }>('/api/tunnel', { method: 'PUT', body: JSON.stringify(body) }),
   generateKey: () => request<{ publicKey: string }>('/api/tunnel/key', { method: 'POST' }),
+  pairTunnel: (text: string) => request<{
+    config: TunnelConfig;
+    baseUrl: string; baseUrlLiteral: string;
+    token: string | null; hasExistingToken: boolean;
+    status: TunnelState;
+    steps: Record<string, { ok: boolean; output: string }>;
+  }>('/api/tunnel/pair', { method: 'POST', body: JSON.stringify({ text }) }),
   tunnelAction: (action: 'start' | 'stop' | 'restart' | 'enable' | 'disable' | 'logs') =>
     request<{ ok: boolean; output: string }>(`/api/tunnel/${action}`, { method: 'POST' }),
 

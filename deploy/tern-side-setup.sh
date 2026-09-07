@@ -289,23 +289,23 @@ else
   warn "could not reload sshd automatically; run: sudo systemctl reload ssh"
 fi
 
-# ---------- what to tell Tern ----------
+# ---------- hand the answer back ----------
+#
+# The bridge address is the one thing perch cannot work out for itself: it is
+# a property of this machine, and the tunnel key is restricted to nologin so
+# perch cannot ask. Rather than have somebody read an IP address off a
+# terminal and retype it, this prints one line to paste back, and perch does
+# the rest from it.
 TERN_HOST="${USE_NAME:-$BIND}"
 BASE_URL="http://$TERN_HOST:$PORT"
 cat <<EOF
 
-$B  Done. The Tern box is ready for the tunnel.$N
+$B  Done. The Tern box is ready.$N
 
-  Give Tern this, under Admin → AI model:
+  Copy this line into perch, under Connect:
 
-    Provider   Ollama
-    Base URL   $C$BASE_URL$N
-    API key    the token from the perch console
+    ${C}perch-pair:v1:$BIND:$PORT${N}
 
 EOF
-if [ -n "$USE_NAME" ]; then
-  note "host.containers.internal is the name Tern's container has for $BIND."
-  note "If Tern ever cannot reach it, use http://$BIND:$PORT instead."
-fi
-note "Nothing is listening yet — start the tunnel on the perch box, then press"
-note "Test connection in Tern. If it fails, see docs/TROUBLESHOOTING.md."
+note "perch will fill in the rest, start the tunnel and give you the two"
+note "settings for Tern. (For reference, Tern's base URL will be $BASE_URL.)"

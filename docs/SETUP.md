@@ -44,9 +44,23 @@ is rebuilt or restarted unless it changed.
 
 ## Then the tunnel
 
-Open `http://127.0.0.1:8099` and go to **Connect**. Five steps: generate a key,
-enter where Tern lives, run one command on the Tern box, start the tunnel,
-copy two settings into Tern.
+Open `http://127.0.0.1:8099` and go to **Connect**.
+
+1. **Generate a key.** It never leaves this machine.
+2. **Type the SSH host** of the box Tern runs on. That is the only thing you
+   need to know.
+3. **Run the one command it shows you** on that box. It creates a locked-down
+   account, installs the key with restrictions, teaches sshd to reap dead
+   tunnels, and prints one line.
+4. **Paste that line back.** Paste the whole terminal output if it is easier —
+   perch finds the line in it. It then saves the address, writes the systemd
+   unit, starts the tunnel, enables it at boot and mints a token.
+5. **Copy the base URL and API key into Tern**, under Admin → AI model.
+
+The pasted line is the only thing that travels between the two machines. The
+address it carries belongs to the Tern box, and the tunnel key is restricted
+to `nologin` so perch cannot ask for it over SSH — which is the point of the
+restriction, and the reason for the paste.
 
 If you would rather do it from a terminal, [REMOTE.md](REMOTE.md) has every
 command written out.

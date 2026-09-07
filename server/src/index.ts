@@ -125,12 +125,34 @@ function startIdleWatcher(): NodeJS.Timeout {
   }, 20_000);
 }
 
+/**
+ * A port already in use is the most likely reason perch fails to start —
+ * usually another copy of it, or something else on 11434. Node's default for
+ * that is an unhandled 'error' event and a stack trace, which tells you
+ * nothing you can act on. Say which port and what to do instead.
+ */
+function onListenError(what: string, port: number, bind: string): (err: NodeJS.ErrnoException) => void {
+  return (err) => {
+    if (err.code === 'EADDRINUSE') {
+      log.error(`the ${what} cannot start: ${bind}:${port} is already in use`);
+      log.error(`something else is on that port — another perch, perhaps. Check with: ss -lntp | grep ${port}`);
+    } else if (err.code === 'EACCES') {
+      log.error(`the ${what} cannot start: not allowed to bind ${bind}:${port}`);
+    } else {
+      log.error(`the ${what} cannot start`, err.message);
+    }
+    process.exit(1);
+  };
+}
+
 function main(): void {
   fs.mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
   const state = loadState();
 
   const consoleServer = startConsole();
+  consoleServer.on('error', onListenError('console', config.consolePort, config.consoleBind));
   const proxyServer = createProxyServer();
+  proxyServer.on('error', onListenError('model endpoint', config.proxyPort, config.proxyBind));
   proxyServer.listen(config.proxyPort, config.proxyBind, () => {
     log.info(`model endpoint on http://${config.proxyBind}:${config.proxyPort}`);
   });
@@ -142,7 +164,12 @@ function main(): void {
   if (config.consoleBind !== '127.0.0.1' && !state.console.passwordHash) {
     log.warn(`the console is bound to ${config.consoleBind} with no password; it will refuse every request that is not from this machine`);
   }
-  log.info(`perch ${config.version} ready`);
+  // Logged once both listeners are actually bound, so a failed bind does not
+  // print a reassuring "ready" line just before the error.
+  let up = 0;
+  const readyWhenBoth = (): void => { up += 1; if (up === 2) log.info(`perch ${config.version} ready`); };
+  consoleServer.on('listening', readyWhenBoth);
+  proxyServer.on('listening', readyWhenBoth);
 
   const shutdown = (signal: string): void => {
     log.info(`${signal}: shutting down`);

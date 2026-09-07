@@ -40,9 +40,9 @@ appear token by token.
 - **Models** — download with a progress bar, delete, load and unload, see what
   is resident and how much of it is on the GPU, and a short list of models
   worth using for email with a note on what each is actually like.
-- **Connect** — the whole tunnel setup as five steps: generate a key, say where
-  Tern lives, run one command over there, start the tunnel, copy two settings
-  into Tern.
+- **Connect** — the whole tunnel setup: a key, the SSH host, one command to run
+  on the Tern box, and one line pasted back. Ends with the base URL and API key
+  for Tern.
 - **System** — start, stop and restart the containers, turn on starting at
   boot, tune Ollama's memory settings, read logs.
 - **Activity** — what came through the endpoint, so that when Tern says the
@@ -69,8 +69,18 @@ sudo ./install.sh
 
 It finds your GPU, works out how big a model will fit, downloads one, starts
 the containers and prints a token. Then open `http://127.0.0.1:8099` and go to
-**Connect**, which walks through the tunnel and ends with the two values to
-paste into Tern's **Admin → AI model** page.
+**Connect**.
+
+Setting up the tunnel is three things: type the SSH host of the Tern box, run
+the one command it gives you over there, and paste back the single line that
+command prints. perch works out the rest — the address, the systemd unit,
+starting the tunnel, enabling it at boot, and a token — and finishes by showing
+the base URL and API key to paste into Tern's **Admin → AI model** page.
+
+That one line back is the only thing you carry between the machines. perch
+cannot work it out for itself: the address belongs to the Tern box, and the
+tunnel key is deliberately restricted to `nologin`, so there is nothing perch
+can ask.
 
 Requires podman, podman-compose and the openssh client. For an NVIDIA card you
 also need the container toolkit with CDI configured; the installer checks and

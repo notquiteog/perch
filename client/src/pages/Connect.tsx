@@ -3,30 +3,33 @@ import { api, type TokenRecord, type TunnelPage } from '../api';
 import { Card, CodeBlock, Copy, Notice, Spinner, Tag } from '../components/ui';
 
 /**
- * The setup flow, in the order a person actually does it: make a key, say
- * where Tern lives, authorise the key over there, start the tunnel, then hand
- * Tern its two settings. Each step shows whether it is done, so coming back to
- * a half-finished setup picks up where it left off.
+ * Setup, in the order a person actually does it, and with as little carried
+ * between the two machines by hand as the design allows: type the SSH host,
+ * run one command over there, paste back the one line it prints. perch does
+ * the rest — the address, the unit, starting the tunnel, enabling it at boot
+ * and minting a token — and finishes by showing the two values Tern wants.
  */
 export default function Connect() {
   const [page, setPage] = useState<TunnelPage | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: 'good' | 'bad' | 'info'; text: string } | null>(null);
-  const [form, setForm] = useState({ host: '', user: 'perch', sshPort: 22, remoteBind: '', remotePort: 11434 });
+  const [form, setForm] = useState({ host: '', user: 'perch', sshPort: 22, remotePort: 11434 });
+  const [paste, setPaste] = useState('');
   const [newToken, setNewToken] = useState<string | null>(null);
   const [tokens, setTokens] = useState<TokenRecord[]>([]);
+  const [advanced, setAdvanced] = useState(false);
 
   const refresh = useCallback(async () => {
     const [t, tk] = await Promise.all([api.tunnel(), api.tokens()]);
     setPage(t);
     setTokens(tk.tokens.filter((x) => !x.revokedAt));
-    setForm({
-      host: t.config.host,
+    setForm((f) => ({
+      ...f,
+      host: t.config.host || f.host,
       user: t.config.user,
       sshPort: t.config.sshPort,
-      remoteBind: t.config.remoteBind,
       remotePort: t.config.remotePort,
-    });
+    }));
   }, []);
 
   useEffect(() => {
@@ -51,8 +54,10 @@ export default function Connect() {
   if (!page) return <div className="row"><Spinner /> <span className="mono">loading…</span></div>;
 
   const hasKey = Boolean(page.publicKey);
-  const hasTarget = Boolean(page.config.host);
+  const hasHost = Boolean(page.config.host);
+  const paired = Boolean(page.config.configuredAt && page.config.remoteBind);
   const running = page.status.active === 'active';
+  const done = paired && running;
 
   return (
     <>
@@ -65,11 +70,53 @@ export default function Connect() {
         </p>
       </div>
 
-      {message && <Notice tone={message.tone}>{message.text}</Notice>}
+      {message && <Notice tone={message.tone}><span style={{ whiteSpace: 'pre-wrap' }}>{message.text}</span></Notice>}
 
-      <Card>
+      {/* When it is up, the thing you came here for goes at the top. */}
+      {done && (
+        <Card title="Put these in Tern" sub="Admin → AI model. Set the provider to Ollama.">
+          <div className="field" style={{ maxWidth: 560 }}>
+            <label>Base URL</label>
+            <CodeBlock text={page.ternBaseUrl} />
+            <span className="hint">
+              If Tern cannot resolve that name, use <span className="mono">{page.ternBaseUrlLiteral}</span> instead.
+            </span>
+          </div>
+          <div className="field" style={{ maxWidth: 560 }}>
+            <label>API key</label>
+            {newToken ? (
+              <>
+                <CodeBlock text={newToken} wrap />
+                <span className="hint">Copy it now — this is the only time it is shown.</span>
+              </>
+            ) : (
+              <div className="row">
+                <span className="hint">
+                  {tokens.length} token{tokens.length === 1 ? '' : 's'} already issued. perch keeps only a hash,
+                  so if you no longer have it, make another.
+                </span>
+                <button className="sm" disabled={busy !== null}
+                  onClick={() => void run('token', async () => { setNewToken((await api.createToken('Tern', ['use', 'manage'])).token); })}>
+                  {busy === 'token' ? <Spinner /> : 'New token'}
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="row">
+            <Tag tone="good">tunnel running</Tag>
+            <Tag tone={page.status.enabled === 'enabled' ? 'good' : 'warn'}>
+              {page.status.enabled === 'enabled' ? 'starts at boot' : 'not started at boot'}
+            </Tag>
+            <Tag tone={page.status.endpointUp ? 'good' : 'bad'}>
+              {page.status.endpointUp ? 'endpoint listening' : 'endpoint down'}
+            </Tag>
+          </div>
+        </Card>
+      )}
+
+      <Card title={done ? 'Setup' : undefined}>
         <ol className="steps">
-          {/* 1 — the key */}
+          {/* 1 */}
           <li className={hasKey ? 'done' : ''}>
             <h3>A key for the tunnel</h3>
             <p>
@@ -77,80 +124,69 @@ export default function Connect() {
               holding the tunnel open, and the far side restricts it to exactly that.
             </p>
             {hasKey ? (
-              <>
-                <CodeBlock text={page.publicKey!} wrap />
-                <p className="sub" style={{ marginTop: 8, marginBottom: 0 }}>
-                  <Tag tone="good">key ready</Tag> Private half stays at{' '}
-                  <span className="mono">{page.config.keyPath}</span>.
-                </p>
-              </>
+              <p className="sub" style={{ marginBottom: 0 }}>
+                <Tag tone="good">key ready</Tag> Private half stays at{' '}
+                <span className="mono">{page.config.keyPath}</span>.
+              </p>
             ) : (
-              <button className="primary" disabled={busy !== null} onClick={() => void run('key', api.generateKey, 'Key generated.')}>
+              <button className="primary" disabled={busy !== null}
+                onClick={() => void run('key', api.generateKey, 'Key generated.')}>
                 {busy === 'key' ? <Spinner /> : 'Generate a key'}
               </button>
             )}
           </li>
 
-          {/* 2 — where Tern is */}
-          <li className={hasTarget ? 'done' : ''}>
+          {/* 2 */}
+          <li className={hasHost ? 'done' : ''}>
             <h3>Where Tern runs</h3>
-            <p>
-              The machine you would SSH into to administer Tern. The account below is
-              created for you in the next step — it is not your own login.
-            </p>
-            <div className="grid cols-2" style={{ maxWidth: 620 }}>
-              <div className="field">
-                <label htmlFor="host">Host</label>
+            <p>The machine you would SSH into to administer Tern. That is the only thing you have to know.</p>
+            <div className="row" style={{ alignItems: 'flex-end', maxWidth: 620 }}>
+              <div className="field" style={{ marginBottom: 0, flex: 1, minWidth: 220 }}>
+                <label htmlFor="host">SSH host</label>
                 <input id="host" type="text" placeholder="mail.example.com" value={form.host}
                   onChange={(e) => setForm({ ...form, host: e.target.value })} />
-                <span className="hint">Hostname or IP of the Tern box.</span>
               </div>
-              <div className="field">
-                <label htmlFor="sshPort">SSH port</label>
+              <div className="field" style={{ marginBottom: 0, width: 110 }}>
+                <label htmlFor="sshPort">Port</label>
                 <input id="sshPort" type="number" value={form.sshPort}
                   onChange={(e) => setForm({ ...form, sshPort: Number(e.target.value) })} />
-                <span className="hint">22 unless you moved it.</span>
               </div>
-              <div className="field">
-                <label htmlFor="user">Tunnel account</label>
-                <input id="user" type="text" value={form.user}
-                  onChange={(e) => setForm({ ...form, user: e.target.value })} />
-                <span className="hint">Created on the Tern box, with no shell.</span>
-              </div>
-              <div className="field">
-                <label htmlFor="remotePort">Port over there</label>
-                <input id="remotePort" type="number" value={form.remotePort}
-                  onChange={(e) => setForm({ ...form, remotePort: Number(e.target.value) })} />
-                <span className="hint">Where Tern will find the model.</span>
-              </div>
-              <div className="field" style={{ gridColumn: '1 / -1' }}>
-                <label htmlFor="remoteBind">Address to land on</label>
-                <input id="remoteBind" type="text" placeholder="filled in by the setup script" value={form.remoteBind}
-                  onChange={(e) => setForm({ ...form, remoteBind: e.target.value })} />
-                <span className="hint">
-                  Tern runs in a container, so loopback on the Tern box is not reachable from
-                  inside it — this is the podman bridge address instead. The setup script in the
-                  next step works it out and prints it. Only private addresses are accepted.
-                </span>
-              </div>
+              <button disabled={busy !== null || !form.host} style={{ marginBottom: 1 }}
+                onClick={() => void run('save', () => api.saveTunnel({ host: form.host, sshPort: form.sshPort, user: form.user, remotePort: form.remotePort }), 'Saved.')}>
+                {busy === 'save' ? <Spinner /> : 'Save'}
+              </button>
             </div>
-            <button
-              disabled={busy !== null || !form.host || !form.remoteBind}
-              onClick={() => void run('save', () => api.saveTunnel(form), 'Saved, and the tunnel service was rewritten.')}
-            >
-              {busy === 'save' ? <Spinner /> : 'Save'}
+
+            <button className="ghost sm" style={{ marginTop: 10 }} onClick={() => setAdvanced(!advanced)}>
+              {advanced ? 'Hide' : 'Show'} the other two settings
             </button>
+            {advanced && (
+              <div className="grid cols-2" style={{ maxWidth: 480, marginTop: 8 }}>
+                <div className="field">
+                  <label htmlFor="user">Tunnel account</label>
+                  <input id="user" type="text" value={form.user}
+                    onChange={(e) => setForm({ ...form, user: e.target.value })} />
+                  <span className="hint">Created for you on the Tern box, with no shell. Not your own login.</span>
+                </div>
+                <div className="field">
+                  <label htmlFor="remotePort">Port over there</label>
+                  <input id="remotePort" type="number" value={form.remotePort}
+                    onChange={(e) => setForm({ ...form, remotePort: Number(e.target.value) })} />
+                  <span className="hint">Where Tern will find the model. Change it only if 11434 is taken.</span>
+                </div>
+              </div>
+            )}
           </li>
 
-          {/* 3 — the far side */}
-          <li>
-            <h3>Authorise the key on the Tern box</h3>
+          {/* 3 */}
+          <li className={paired ? 'done' : ''}>
+            <h3>Run one command on the Tern box</h3>
             <p>
-              Run this over there, once. It creates the locked-down account, installs the key
-              with restrictions so it can do nothing but hold this one port open, and prints
-              the address to put in the box above.
+              It creates the locked-down account, installs the key with restrictions so it can
+              do nothing but hold this one port open, teaches sshd to reap dead tunnels, and
+              prints one line to bring back.
             </p>
-            {hasKey ? (
+            {hasKey && hasHost ? (
               <>
                 <CodeBlock text={page.setupCommand!} wrap />
                 <details style={{ marginTop: 10 }}>
@@ -161,13 +197,55 @@ export default function Connect() {
                 </details>
               </>
             ) : (
-              <p className="sub">Generate a key first.</p>
+              <p className="sub">Generate a key and enter the host first.</p>
             )}
           </li>
 
-          {/* 4 — start it */}
+          {/* 4 */}
+          <li className={paired ? 'done' : ''}>
+            <h3>Paste what it printed</h3>
+            <p>
+              The last thing the script prints is a line beginning{' '}
+              <span className="mono">perch-pair:</span>. Paste that line — or just select the
+              whole output and paste all of it — and perch will finish the setup: the address,
+              the service, starting the tunnel, starting it at boot, and a token.
+            </p>
+            <div className="field" style={{ maxWidth: 620 }}>
+              <textarea
+                rows={3}
+                placeholder="perch-pair:v1:10.89.0.1:11434"
+                value={paste}
+                onChange={(e) => setPaste(e.target.value)}
+              />
+              <span className="hint">
+                perch cannot work this address out for itself: it belongs to the Tern box, and the
+                tunnel key is restricted to <span className="mono">nologin</span>, so there is nothing
+                it can ask.
+              </span>
+            </div>
+            <button
+              className="primary"
+              disabled={busy !== null || !paste.trim() || !hasKey || !hasHost}
+              onClick={() => void run('pair', async () => {
+                const r = await api.pairTunnel(paste);
+                if (r.token) setNewToken(r.token);
+                setPaste('');
+                const up = r.status.active === 'active';
+                setMessage({
+                  tone: up ? 'good' : 'bad',
+                  text: up
+                    ? `Connected. Tern's base URL is ${r.baseUrl}.`
+                    : `Saved, but the tunnel did not come up: ${(r.steps.started?.output || '').trim().split('\n').slice(-3).join('\n') || 'see the log below'}`,
+                });
+              })}
+            >
+              {busy === 'pair' ? <Spinner /> : 'Connect'}
+            </button>
+          </li>
+
+          {/* 5 */}
           <li className={running ? 'done' : ''}>
-            <h3>Start the tunnel</h3>
+            <h3>The tunnel</h3>
             <p>
               systemd owns the connection, so it comes back after a dropped line, a router
               reboot or a power cut — not just while this page is open.
@@ -180,22 +258,20 @@ export default function Connect() {
               <Tag tone={page.status.endpointUp ? 'good' : 'bad'}>
                 {page.status.endpointUp ? 'endpoint listening' : 'endpoint down'}
               </Tag>
+              {page.config.remoteBind && paired && (
+                <span className="hint mono">landing on {page.config.remoteBind}:{page.config.remotePort}</span>
+              )}
             </div>
             <div className="row">
-              <button className="primary" disabled={busy !== null || !hasTarget}
-                onClick={() => void run('start', () => api.tunnelAction(running ? 'restart' : 'start'), running ? 'Restarted.' : 'Started.')}>
-                {busy === 'start' ? <Spinner /> : running ? 'Restart' : 'Start'}
+              <button disabled={busy !== null || !paired}
+                onClick={() => void run('restart', () => api.tunnelAction(running ? 'restart' : 'start'), running ? 'Restarted.' : 'Started.')}>
+                {busy === 'restart' ? <Spinner /> : running ? 'Restart' : 'Start'}
               </button>
               {running && (
                 <button disabled={busy !== null} onClick={() => void run('stop', () => api.tunnelAction('stop'), 'Stopped.')}>
                   {busy === 'stop' ? <Spinner /> : 'Stop'}
                 </button>
               )}
-              <button disabled={busy !== null}
-                onClick={() => void run('boot', () => api.tunnelAction(page.status.enabled === 'enabled' ? 'disable' : 'enable'),
-                  page.status.enabled === 'enabled' ? 'It will no longer start at boot.' : 'It will start at boot.')}>
-                {busy === 'boot' ? <Spinner /> : page.status.enabled === 'enabled' ? 'Do not start at boot' : 'Start at boot'}
-              </button>
               <button className="ghost" disabled={busy !== null}
                 onClick={() => void run('logs', async () => {
                   const r = await api.tunnelAction('logs');
@@ -208,62 +284,6 @@ export default function Connect() {
               <summary style={{ cursor: 'pointer', color: 'var(--ink-dim)', fontSize: 12.5 }}>What systemd runs</summary>
               <div style={{ marginTop: 8 }}><CodeBlock text={page.sshCommand} wrap /></div>
             </details>
-          </li>
-
-          {/* 5 — tell Tern */}
-          <li>
-            <h3>Give Tern its two settings</h3>
-            <p>In Tern, open <strong>Admin → AI model</strong>, set the provider to Ollama, and paste these.</p>
-
-            <div className="field" style={{ maxWidth: 560 }}>
-              <label>Base URL</label>
-              <CodeBlock text={page.ternBaseUrl} />
-              <span className="hint">
-                If Tern cannot reach that name, use the address directly:{' '}
-                <span className="mono">{page.ternBaseUrlLiteral}</span>
-              </span>
-            </div>
-
-            <div className="field" style={{ maxWidth: 560 }}>
-              <label>API key</label>
-              {newToken ? (
-                <>
-                  <CodeBlock text={newToken} wrap />
-                  <span className="hint">
-                    Copy it now — this is the only time it is shown. perch keeps a hash, not the token.
-                  </span>
-                </>
-              ) : (
-                <>
-                  <div className="row">
-                    <button
-                      disabled={busy !== null}
-                      onClick={() => void run('token', async () => {
-                        const r = await api.createToken('Tern', ['use', 'manage']);
-                        setNewToken(r.token);
-                      })}
-                    >
-                      {busy === 'token' ? <Spinner /> : 'Make a token for Tern'}
-                    </button>
-                    {tokens.length > 0 && (
-                      <span className="hint">
-                        {tokens.length} token{tokens.length === 1 ? '' : 's'} already issued — manage them under Settings.
-                      </span>
-                    )}
-                  </div>
-                  <span className="hint">
-                    Issued with model management, so Tern&apos;s own Admin page can download and
-                    remove models on this machine. Drop that under Settings if you would rather it could not.
-                  </span>
-                </>
-              )}
-            </div>
-
-            <p className="sub" style={{ marginBottom: 0 }}>
-              Then press <strong>Test connection</strong> in Tern. If it fails, the Activity page here
-              shows whether the request arrived at all — which tells you whether to look at the tunnel
-              or at Tern.
-            </p>
           </li>
         </ol>
       </Card>

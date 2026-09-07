@@ -67,6 +67,25 @@ Two things have to be true for that to be allowed:
 `deploy/tern-side-setup.sh` sets both, scoped to the tunnel account with a
 `Match User` block so nothing about how *you* log in changes.
 
+### Why you paste one line back
+
+The bridge address is a property of the Tern box. perch cannot discover it:
+the tunnel key is restricted with `command="/usr/sbin/nologin"`, so there is no
+way to run `podman network inspect` over the SSH connection — and giving the
+key the ability to run commands to save one paste would be a bad trade.
+
+So the setup script, which is already running on that machine with the
+privileges to find out, prints it:
+
+```
+perch-pair:v1:10.89.0.1:11434
+```
+
+Paste that into perch's Connect page — or paste the whole terminal output and
+let it find the line — and perch saves the address, renders the systemd unit,
+starts the tunnel, enables it at boot and mints a token. The pasted value goes
+through the same private-address check as anything typed by hand.
+
 ### Why not just bind 0.0.0.0
 
 Because on a VPS that is the public internet. The setup script, the host

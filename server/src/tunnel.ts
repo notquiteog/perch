@@ -176,6 +176,33 @@ function localEndpointUp(): Promise<boolean> {
   });
 }
 
+export interface Pairing { bind: string; port: number }
+
+/**
+ * The one value perch cannot work out for itself.
+ *
+ * The bridge address belongs to the Tern box, and the tunnel key is
+ * deliberately restricted to nologin, so there is no way to ask for it over
+ * SSH. tern-side-setup.sh prints it as a single line; this reads that line
+ * back out of whatever was pasted, so somebody can select the whole terminal
+ * output rather than picking the address out of it by eye.
+ */
+export function parsePairing(text: string): Pairing {
+  const match = /perch-pair:v1:(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})/.exec(text || '');
+  if (!match) {
+    throw badRequest(
+      'No pairing line found in that. Look for the line beginning "perch-pair:" '
+      + 'in what the setup script printed on the Tern box, and paste it (or the whole output) here.',
+    );
+  }
+  const bind = match[1]!;
+  const port = Number(match[2]);
+  // Runs the same rail as everything else: a pasted line is untrusted input
+  // like any other, and this one decides what address gets bound.
+  validate({ remoteBind: bind, remotePort: port });
+  return { bind, port };
+}
+
 export async function generateKey(): Promise<string> {
   const result = await runHostAction('tunnel.keygen', '', 30_000);
   if (!result.ok) throw badRequest(result.output || 'could not generate a key');
