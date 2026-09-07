@@ -25,23 +25,44 @@ much easier job than it sounds — you do not need a large model to do it well.
 
 | Model | Wants | Notes |
 |---|---|---|
-| `qwen3.5:2b` | 4.8 GB | Runs anywhere, including with no GPU. Good for tidying up text you wrote; not for drafting unsupervised. |
-| `qwen3.5:4b` | 5.6 GB | The smallest that writes a whole email without wandering. Comfortable on a 6–8 GB card. |
-| `qwen3.5:9b` | 9.4 GB | **The sensible floor for drafts you would send after a glance.** The sweet spot on a 12–16 GB card, and its long context means a whole thread fits. |
-| `gemma3:12b` | 11.3 GB | A step up for a 16 GB card if you prefer Gemma's register. |
-| `phi4:14b` | 12.4 GB | Follows an instruction exactly, which suits rewriting and shortening. Only 16k of context, so long threads get trimmed. |
-| `mistral-small:24b` | 18.7 GB | Wants a 24 GB card. Too tight on 16 GB — the weights leave nothing for context. |
-| `qwen3.5:27b` | 22.4 GB | For a 24–32 GB card. Where drafts often need no edit at all. |
+| `qwen3.5:2b` | 4.8 GB | Runs anywhere, no GPU needed. Shipped at Q8, so less lossy than its size suggests. Tidying text rather than drafting. |
+| `qwen3.5:4b` | 5.6 GB | The smallest that writes a whole email without wandering. A 6–8 GB card. |
+| `qwen3.5:9b` | 9.4 GB | The floor for drafts you would send after a glance. 262k context, so a whole thread fits untrimmed. |
+| `gemma4:12b` | 10.6 GB | **The pick for a 12–16 GB card.** A true 12B in 7.6 GB — smaller on disk than `gemma4:e4b` and considerably better. |
+| `gemma4:e4b` | 13.0 GB | A nested build: ~4B parameters active out of a 9.6 GB file. Fast, but `gemma4:12b` beats it in a smaller file. |
+| `qwen3.8:27b` | 22.8 GB | Newest Qwen, and it ships only at 27b — under 24 GB there is no build of this generation, so `qwen3.5:9b` remains the current answer. |
+| `gemma4:31b` | 25.3 GB | A 32 GB card. The largest dense Gemma of this generation. |
+
+### Uncensored variants
+
+Abliterated builds have the refusal direction ablated out of the weights. Worth
+having when a stock model declines something ordinary — a firm complaint, a
+debt letter, a frank review.
+
+| Model | Wants | Notes |
+|---|---|---|
+| `huihui_ai/qwen3.5-abliterated:9b` | 9.4 GB | Same size and quantisation as stock. The lightest of these on 16 GB. |
+| `huihui_ai/gemma-4-abliterated:12b` | 10.6 GB | True 12B, newest generation. Best quality per gigabyte here on 16 GB. |
+| `huihui_ai/qwen3-abliterated:14b` | 12.3 GB | The largest true parameter count that fits 16 GB with context headroom. |
+| `huihui_ai/gemma-4-abliterated:e4b` | 13.0 GB | Nested, ~4B active. Fast; the 12b above is better. |
+| `huihui_ai/mistral-small-abliterated:24b` | 18.7 GB | Wants 24 GB. On 16 GB the weights alone are 14.3 GB and leave nothing for context. |
+
+Two things to weigh. Ablation can soften instruction-following and make a model
+slightly likelier to invent detail, so compare against the stock model on your
+own mail rather than assuming an upgrade. And if you run a Tern AI responder in
+send mode, the model's own refusals were the last check before an odd prompt
+became an odd sent email — keep responders on the review queue while judging
+one.
 
 "Wants" is the download plus room to run: roughly 20% overhead and another
 1.5 GB for the context window and a second request slot. A model whose weights
-merely fit will spill into system memory on the first long thread and generate
-at a fraction of the speed.
+merely fit will spill into system memory on the first long thread.
 
-Sizes above were read from the Ollama registry, not remembered. The ranking by
-quality is a different matter and worth testing on your own mail — a newer
-model at a smaller size often beats an older larger one, which is why the
-recommendation prefers the current generation over whatever is biggest.
+Every tag above was checked against the Ollama registry. Sizes are measured;
+the ranking by quality is worth testing on your own mail, because a newer model
+at a smaller size often beats an older larger one — which is why the
+recommendation prefers the current generation over whatever is biggest, and why
+nested builds are never auto-recommended despite their larger files.
 
 perch's Models page greys out anything that will not fit and marks the one it
 recommends for your hardware.

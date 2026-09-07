@@ -179,8 +179,9 @@ else USABLE_MB=$(( RAM_KB / 1024 * 2 / 3 )); BASIS="system memory"; fi
 # context window, not the download alone.
 pick_model() {
   local mb=$1
-  if   [ "$mb" -ge 52500 ]; then echo "llama3.3:70b"
-  elif [ "$mb" -ge 22400 ]; then echo "qwen3.5:27b"
+  if   [ "$mb" -ge 25400 ]; then echo "gemma4:31b"
+  elif [ "$mb" -ge 22800 ]; then echo "qwen3.8:27b"
+  elif [ "$mb" -ge 10600 ]; then echo "gemma4:12b"
   elif [ "$mb" -ge 9400  ]; then echo "qwen3.5:9b"
   elif [ "$mb" -ge 5600  ]; then echo "qwen3.5:4b"
   else echo "qwen3.5:2b"; fi

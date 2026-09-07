@@ -14,7 +14,7 @@ import {
 import { loadState, updateState } from './state.js';
 import * as ollama from './ollama.js';
 import { hostAvailable, readHostStatus, runHostAction, HostUnavailable, type HostAction } from './host.js';
-import { sizing, MODELS, EMBED_MODELS, human } from './system.js';
+import { sizing, MODELS, EMBED_MODELS, UNCENSORED_MODELS, human } from './system.js';
 import { proxyInFlight, routeTable } from './proxy.js';
 import { throughput } from './metrics.js';
 import { recent, summary } from './activity.js';
@@ -249,6 +249,7 @@ export function buildApi(): Router {
       loaded,
       catalog: MODELS,
       embedCatalog: EMBED_MODELS,
+      uncensoredCatalog: UNCENSORED_MODELS,
       sizing: sizing(),
       totalBytes: installed.reduce((n, m) => n + (m.size || 0), 0),
       totalHuman: human(installed.reduce((n, m) => n + (m.size || 0), 0)),

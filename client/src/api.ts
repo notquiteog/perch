@@ -24,7 +24,10 @@ export interface ModelInfo {
   name: string; model: string; size: number; digest: string; modified_at: string;
   details?: { family?: string; parameter_size?: string; quantization_level?: string };
 }
-export interface ModelChoice { name: string; needsBytes: number; params: string; note: string }
+export interface ModelChoice {
+  name: string; needsBytes: number; sizeBytes: number;
+  params: string; contextTokens: number | null; current?: boolean; note: string;
+}
 export interface Sizing { basis: 'vram' | 'ram'; usableBytes: number; recommended: ModelChoice; fits: ModelChoice[]; numCtx: number }
 export interface Throughput { current: number; last: number; average: number; ttftMs: number | null; generations: number; totalTokens: number }
 
@@ -111,7 +114,7 @@ export const api = {
 
   models: () => request<{
     installed: ModelInfo[]; loaded: LoadedModel[];
-    catalog: ModelChoice[]; embedCatalog: ModelChoice[];
+    catalog: ModelChoice[]; embedCatalog: ModelChoice[]; uncensoredCatalog: ModelChoice[];
     sizing: Sizing; totalBytes: number; totalHuman: string;
   }>('/api/models'),
   deleteModel: (name: string) => request<{ ok: true }>('/api/models/delete', { method: 'POST', body: JSON.stringify({ name }) }),

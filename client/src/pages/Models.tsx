@@ -9,6 +9,8 @@ export default function Models() {
   const [loaded, setLoaded] = useState<LoadedModel[]>([]);
   const [catalog, setCatalog] = useState<ModelChoice[]>([]);
   const [embedCatalog, setEmbedCatalog] = useState<ModelChoice[]>([]);
+  const [uncensored, setUncensored] = useState<ModelChoice[]>([]);
+  const [showUncensored, setShowUncensored] = useState(false);
   const [sizing, setSizing] = useState<Sizing | null>(null);
   const [totalHuman, setTotalHuman] = useState('0 B');
   const [busy, setBusy] = useState<string | null>(null);
@@ -22,6 +24,7 @@ export default function Models() {
     setLoaded(data.loaded);
     setCatalog(data.catalog);
     setEmbedCatalog(data.embedCatalog);
+    setUncensored(data.uncensoredCatalog);
     setSizing(data.sizing);
     setTotalHuman(data.totalHuman);
   }, []);
@@ -202,7 +205,50 @@ export default function Models() {
         </table>
       </Card>
 
-      <Card title="Something else" sub="Any tag from ollama.com/library, for example qwen3:8b or phi4:14b.">
+      <Card
+        title="Uncensored variants"
+        sub="Abliterated builds, where the refusal behaviour has been ablated out of the weights. Useful when a stock model declines something ordinary — a firm complaint, a debt letter, a frank review — and the mail and the machine are both yours."
+        right={
+          <button className="sm" onClick={() => setShowUncensored(!showUncensored)}>
+            {showUncensored ? 'Hide' : `Show ${uncensored.length}`}
+          </button>
+        }
+      >
+        {showUncensored && (
+          <>
+            <Notice tone="info">
+              Ablation is not free: it can soften instruction-following and make a model a little
+              likelier to invent detail, so compare one against the stock model on your own mail
+              rather than assuming it is an upgrade. And if Tern is set to send responder mail
+              without a human in the loop, the model&apos;s own refusals were the last check
+              before an odd prompt became an odd sent email — worth keeping that on the review
+              queue while you get a feel for it.
+            </Notice>
+            <table>
+              <tbody>
+                {uncensored.map((m) => (
+                  <tr key={m.name} style={{ opacity: fits(m) ? 1 : 0.45 }}>
+                    <td style={{ width: '34%' }}>
+                      <div className="mono" style={{ fontSize: 12 }}>{m.name}</div>
+                      <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>
+                        {m.params} · {human(m.sizeBytes)} download · wants {human(m.needsBytes)}
+                      </div>
+                    </td>
+                    <td style={{ color: 'var(--ink-dim)', fontSize: 12.5 }}>{m.note}</td>
+                    <td className="right" style={{ width: 110 }}>
+                      {isInstalled(m.name)
+                        ? <Tag tone="good">installed</Tag>
+                        : <button className="sm" disabled={pull !== null} onClick={() => startPull(m.name)}>Download</button>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </Card>
+
+      <Card title="Something else" sub="Any tag from ollama.com, for example huihui_ai/phi4-abliterated:14b or gemma3:12b.">
         <div className="row">
           <input
             type="text"
