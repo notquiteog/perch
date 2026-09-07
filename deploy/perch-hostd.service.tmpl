@@ -23,8 +23,18 @@ Restart=always
 RestartSec=3
 
 NoNewPrivileges=yes
-ProtectHome=yes
 LockPersonality=yes
+# /home is hidden except for perch's own directory, which the helper genuinely
+# needs: it reads the unit template from there and writes Ollama's tuning
+# values into .env.
+#
+# ProtectHome=yes was wrong here and failed closed in the worst way — a plain
+# "yes" hides /home from the service, and since perch is normally cloned to
+# somewhere under /home, systemd could not execute the script at all. The unit
+# failed with 203/EXEC on essentially every install, and the console simply
+# reported that the host helper was not running.
+ProtectHome=tmpfs
+BindPaths=__PERCH_DIR__
 
 [Install]
 WantedBy=multi-user.target
