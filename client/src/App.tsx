@@ -27,7 +27,7 @@ function currentPage(): PageId {
 
 export default function App() {
   const [page, setPage] = useState<PageId>(currentPage);
-  const [session, setSession] = useState<{ passwordSet: boolean; authenticated: boolean; loopback: boolean; version: string } | null>(null);
+  const [session, setSession] = useState<{ passwordSet: boolean; authenticated: boolean; loopback: boolean; containerised: boolean; version: string } | null>(null);
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
@@ -138,6 +138,20 @@ export default function App() {
       </nav>
 
       <main className="main">
+        {/* Standing, not dismissible. In a container perch cannot tell a
+            request from this machine apart from one off the network, so the
+            only thing keeping the console private is how the port was
+            published — which is exactly the kind of fact that gets forgotten. */}
+        {session.containerised && !session.passwordSet && (
+          <Notice tone="bad">
+            <strong>No console password.</strong> perch is running in a container, so it cannot tell
+            a request from this machine apart from one off your network — the only thing keeping this
+            console private is that the port is published on <span className="mono">127.0.0.1</span>.
+            {' '}
+            <a href="#settings" onClick={() => go('settings')}>Set a password</a> and the protection
+            no longer depends on that.
+          </Notice>
+        )}
         {page === 'status' && <Status go={go} />}
         {page === 'models' && <Models />}
         {page === 'connect' && <Connect />}

@@ -61,14 +61,23 @@ export default function Status({ go }: { go: (page: string) => void }) {
 
       <div className="grid cols-4">
         <Card>
-          <Stat
-            label="Memory"
-            value={human(ramUsed).split(' ')[0]}
-            unit={`${human(ramUsed).split(' ')[1]} of ${human(ramTotal)}`}
-            note={`${Math.round(ramPct)}% in use`}
-          />
-          <Meter pct={ramPct} />
-          <Sparkline data={live.history.ram} max={100} />
+          {/* Without the host helper there is no telemetry at all, and a
+              confident "0 B of 0 B" reads as a broken gauge rather than as a
+              missing one. */}
+          {ramTotal > 0 ? (
+            <>
+              <Stat
+                label="Memory"
+                value={human(ramUsed).split(' ')[0]}
+                unit={`${human(ramUsed).split(' ')[1]} of ${human(ramTotal)}`}
+                note={`${Math.round(ramPct)}% in use`}
+              />
+              <Meter pct={ramPct} />
+              <Sparkline data={live.history.ram} max={100} />
+            </>
+          ) : (
+            <Stat label="Memory" value="—" note="needs the host helper" />
+          )}
         </Card>
 
         <Card>
@@ -85,8 +94,7 @@ export default function Status({ go }: { go: (page: string) => void }) {
             </>
           ) : (
             <>
-              <Stat label="VRAM" value="—" note="no GPU detected; the model runs on the CPU" />
-              <Meter pct={0} />
+              <Stat label="VRAM" value="—" note={host ? 'no GPU detected; the model runs on the CPU' : 'needs the host helper'} />
             </>
           )}
         </Card>
@@ -104,11 +112,15 @@ export default function Status({ go }: { go: (page: string) => void }) {
               <Sparkline data={live.history.gpuUtil} max={100} />
             </>
           ) : (
-            <>
-              <Stat label="CPU" value={Math.round(cpuPct)} unit="%" note={`load ${host?.cpu.load1?.toFixed(2) ?? '—'} over ${host?.cpu.cores ?? '?'} cores`} />
-              <Meter pct={cpuPct} />
-              <Sparkline data={live.history.cpu} max={100} />
-            </>
+            host ? (
+              <>
+                <Stat label="CPU" value={Math.round(cpuPct)} unit="%" note={`load ${host.cpu.load1?.toFixed(2) ?? '—'} over ${host.cpu.cores ?? '?'} cores`} />
+                <Meter pct={cpuPct} />
+                <Sparkline data={live.history.cpu} max={100} />
+              </>
+            ) : (
+              <Stat label="CPU" value="—" note="needs the host helper" />
+            )
           )}
         </Card>
 

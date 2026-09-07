@@ -13,7 +13,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
 import { createProxyServer, proxyInFlight } from './proxy.js';
-import { buildApi, apiErrorHandler } from './api.js';
+import { buildApi, apiErrorHandler, localReachSummary } from './api.js';
 import { loadState } from './state.js';
 import { HttpError, sendJson, type Ctx } from './http.js';
 import * as ollama from './ollama.js';
@@ -161,7 +161,14 @@ function main(): void {
   if (!state.tokens.some((t) => !t.revokedAt)) {
     log.warn('no API tokens yet — nothing can use this perch until you make one in the console');
   }
-  if (config.consoleBind !== '127.0.0.1' && !state.console.passwordHash) {
+  const reach = localReachSummary();
+  if (reach.container && !state.console.passwordHash) {
+    // Said every start, because it is the one place the "only answers on this
+    // machine" promise is weaker than it sounds.
+    log.warn('running in a container, so perch cannot tell a request from the host apart from one off your network:');
+    log.warn('the published port is the only thing keeping the console to this machine. compose.yml publishes it on 127.0.0.1.');
+    log.warn('set a console password (./bin/perch console-password) and the protection stops depending on that.');
+  } else if (config.consoleBind !== '127.0.0.1' && !reach.container && !state.console.passwordHash) {
     log.warn(`the console is bound to ${config.consoleBind} with no password; it will refuse every request that is not from this machine`);
   }
   // Logged once both listeners are actually bound, so a failed bind does not

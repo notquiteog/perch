@@ -4,6 +4,8 @@
 // one is not, you have to be on this machine. There is no third option where
 // the console is reachable and open.
 import type http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
 import { config } from './config.js';
 import {
   checkConsolePassword, consolePasswordSet, createSession, deleteToken, endSession,
@@ -27,16 +29,71 @@ const log = logger('api');
 
 const SESSION_COOKIE = 'perch_session';
 
+/**
+ * "Is this request from the machine perch runs on?"
+ *
+ * Outside a container this is a real question with a real answer: the peer is
+ * loopback or it is not.
+ *
+ * Inside one it is neither. Whatever forwards a published port rewrites the
+ * source address on the way through — rootful podman makes it the network
+ * gateway, rootless podman makes it the container's own address — and in
+ * neither case does the result say anything about whether the original client
+ * was the host or a laptop across the room. An address test there is not a
+ * weak control, it is a control that does nothing while looking like one.
+ *
+ * So perch does not pretend. In a container the boundary is the port publish:
+ * compose.yml offers the console on 127.0.0.1 only, and that — not this
+ * function — is what keeps it to the machine. This says so at startup, and
+ * the console shows a standing banner until a password is set, because with
+ * one the protection is real again and does not depend on a compose file
+ * nobody re-reads.
+ */
+const CONTAINER = fs.existsSync('/run/.containerenv') || fs.existsSync('/.dockerenv');
+
+/** Every address this host answers on, so a rewritten source is recognised. */
+function ownAddresses(): Set<string> {
+  const out = new Set<string>(['127.0.0.1', '::1']);
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const iface of list ?? []) out.add(iface.address);
+  }
+  return out;
+}
+
+function defaultGateway(): string | null {
+  try {
+    // /proc/net/route, little-endian hex; the default route has destination 0.
+    for (const line of fs.readFileSync('/proc/net/route', 'utf8').split('\n').slice(1)) {
+      const f = line.trim().split(/\s+/);
+      if (f.length > 2 && f[1] === '00000000' && f[2]) {
+        const hex = f[2]!;
+        const octets = [6, 4, 2, 0].map((i) => Number.parseInt(hex.slice(i, i + 2), 16));
+        if (octets.every((n) => Number.isFinite(n))) return octets.join('.');
+      }
+    }
+  } catch { /* not Linux, or no /proc */ }
+  return null;
+}
+
+const GATEWAY = CONTAINER ? defaultGateway() : null;
+const LOCAL_ADDRESSES = CONTAINER ? ownAddresses() : new Set(['127.0.0.1', '::1']);
+if (GATEWAY) LOCAL_ADDRESSES.add(GATEWAY);
+
 function isLoopback(req: http.IncomingMessage): boolean {
-  const ip = req.socket.remoteAddress || '';
-  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+  const raw = req.socket.remoteAddress || '';
+  const ip = raw.startsWith('::ffff:') ? raw.slice(7) : raw;
+  return LOCAL_ADDRESSES.has(ip);
+}
+
+/** For the startup warning and the console's banner. */
+export function localReachSummary(): { container: boolean; gateway: string | null } {
+  return { container: CONTAINER, gateway: GATEWAY };
 }
 
 /**
- * The console's gate. A password beats everything; without one, being on the
- * machine is the credential — which is true and sufficient while the console
- * is bound to loopback, and is why binding it elsewhere without a password is
- * refused rather than merely discouraged.
+ * The console's gate. A password beats everything. Without one, the credential
+ * is being on the machine — genuinely checked outside a container, and inside
+ * one delegated to the port publish for the reasons above.
  */
 function requireConsole(ctx: Ctx): void {
   if (consolePasswordSet()) {
@@ -74,6 +131,10 @@ export function buildApi(): Router {
         ? validSession(parseCookies(ctx.req.headers.cookie)[SESSION_COOKIE])
         : isLoopback(ctx.req),
       loopback: isLoopback(ctx.req),
+      // The console shows a standing warning when this is true and no
+      // password is set: in a container, nothing but the port publish is
+      // keeping other people out.
+      containerised: localReachSummary().container,
       version: config.version,
     });
   });

@@ -102,7 +102,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  session: () => request<{ passwordSet: boolean; authenticated: boolean; loopback: boolean; version: string }>('/api/session'),
+  session: () => request<{ passwordSet: boolean; authenticated: boolean; loopback: boolean; containerised: boolean; version: string }>('/api/session'),
   signIn: (password: string) => request<{ ok: true }>('/api/session', { method: 'POST', body: JSON.stringify({ password }) }),
   signOut: () => request<{ ok: true }>('/api/session', { method: 'DELETE' }),
   setConsolePassword: (password: string | null) => request<{ ok: true; passwordSet: boolean }>('/api/console-password', { method: 'POST', body: JSON.stringify({ password }) }),
