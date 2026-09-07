@@ -13,6 +13,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
 import { createProxyServer, proxyInFlight } from './proxy.js';
+import { SERVICES, type ServiceDef } from './services.js';
 import { buildApi, apiErrorHandler, localReachSummary } from './api.js';
 import { loadState } from './state.js';
 import { HttpError, sendJson, type Ctx } from './http.js';
@@ -151,10 +152,21 @@ function main(): void {
 
   const consoleServer = startConsole();
   consoleServer.on('error', onListenError('console', config.consolePort, config.consoleBind));
-  const proxyServer = createProxyServer();
-  proxyServer.on('error', onListenError('model endpoint', config.proxyPort, config.proxyBind));
-  proxyServer.listen(config.proxyPort, config.proxyBind, () => {
-    log.info(`model endpoint on http://${config.proxyBind}:${config.proxyPort}`);
+
+  // One listener per enabled service. chat is always on; the others only when
+  // their container is running, because a port that answers nothing is worse
+  // than no port — it looks like a working endpoint until something uses it.
+  const wanted = new Set(config.enabledServices.split(',').map((x) => x.trim()).filter(Boolean));
+  wanted.add('chat');
+  const running: ServiceDef[] = SERVICES.filter((svc) => wanted.has(svc.id));
+
+  const proxyServers = running.map((svc) => {
+    const server = createProxyServer(svc);
+    server.on('error', onListenError(`${svc.id} endpoint`, svc.port, config.proxyBind));
+    server.listen(svc.port, config.proxyBind, () => {
+      log.info(`${svc.id} endpoint on http://${config.proxyBind}:${svc.port} -> ${svc.upstream}`);
+    });
+    return server;
   });
   const idle = startIdleWatcher();
 
@@ -174,15 +186,16 @@ function main(): void {
   // Logged once both listeners are actually bound, so a failed bind does not
   // print a reassuring "ready" line just before the error.
   let up = 0;
-  const readyWhenBoth = (): void => { up += 1; if (up === 2) log.info(`perch ${config.version} ready`); };
-  consoleServer.on('listening', readyWhenBoth);
-  proxyServer.on('listening', readyWhenBoth);
+  const expected = proxyServers.length + 1;
+  const readyWhenAllBound = (): void => { up += 1; if (up === expected) log.info(`perch ${config.version} ready`); };
+  consoleServer.on('listening', readyWhenAllBound);
+  for (const server of proxyServers) server.on('listening', readyWhenAllBound);
 
   const shutdown = (signal: string): void => {
     log.info(`${signal}: shutting down`);
     clearInterval(idle);
     consoleServer.close();
-    proxyServer.close();
+    for (const server of proxyServers) server.close();
     // Give in-flight generations a moment to finish rather than cutting
     // somebody's draft off mid-sentence.
     setTimeout(() => process.exit(0), 3000).unref();

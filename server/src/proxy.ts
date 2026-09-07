@@ -10,6 +10,7 @@
 import http from 'node:http';
 import { Readable } from 'node:stream';
 import { config } from './config.js';
+import { type ServiceDef, type Route } from './services.js';
 import { authenticate, isBlocked, noteAuthFailure, noteAuthSuccess, noteTokenUse, type Scope } from './auth.js';
 import { loadState } from './state.js';
 import { record } from './activity.js';
@@ -18,37 +19,8 @@ import { logger } from './log.js';
 
 const log = logger('proxy');
 
-interface Route {
-  method: string;
-  path: string;
-  scope: Scope;
-  /** Counts against the concurrency backstop. */
-  generating?: boolean;
-}
-
-// Everything Tern asks for, and nothing else. Ollama's own API is wider than
-// this — /api/create, /api/copy, /api/push and the blob endpoints can write
-// models onto this box or ship them off it — and none of that has any business
-// being reachable from another machine, so it is simply not in the table.
-const ROUTES: Route[] = [
-  { method: 'GET', path: '/api/version', scope: 'use' },
-  { method: 'GET', path: '/api/tags', scope: 'use' },
-  { method: 'GET', path: '/api/ps', scope: 'use' },
-  { method: 'POST', path: '/api/show', scope: 'use' },
-  { method: 'POST', path: '/api/chat', scope: 'use', generating: true },
-  { method: 'POST', path: '/api/generate', scope: 'use', generating: true },
-  { method: 'POST', path: '/api/embed', scope: 'use' },
-  { method: 'POST', path: '/api/embeddings', scope: 'use' },
-  { method: 'POST', path: '/api/pull', scope: 'manage' },
-  { method: 'DELETE', path: '/api/delete', scope: 'manage' },
-  // The OpenAI-compatible surface, for Tern's "openai" provider setting and
-  // for anything else that speaks it.
-  { method: 'GET', path: '/v1/models', scope: 'use' },
-  { method: 'POST', path: '/v1/chat/completions', scope: 'use', generating: true },
-  { method: 'POST', path: '/v1/completions', scope: 'use', generating: true },
-  { method: 'POST', path: '/v1/embeddings', scope: 'use' },
-];
-
+// Shared across every service, because they share one GPU: two image
+// generations and a chat completion at once is the same card three times over.
 let inFlight = 0;
 
 /** Headers that describe one hop and must not be copied to the next. */
@@ -73,8 +45,9 @@ function send(res: http.ServerResponse, status: number, body: unknown, extra: ht
   res.end(payload);
 }
 
-export function createProxyServer(): http.Server {
-  const upstream = new URL(config.ollamaUrl);
+export function createProxyServer(service: ServiceDef): http.Server {
+  const upstream = new URL(service.upstream);
+  const log = logger(`proxy:${service.id}`);
 
   const server = http.createServer((req, res) => {
     const started = Date.now();
@@ -84,14 +57,17 @@ export function createProxyServer(): http.Server {
     let tokenName: string | null = null;
 
     const finish = (status: number, note?: string, bytes = 0): void => {
-      record({ at: new Date().toISOString(), method, path, status, ms: Date.now() - started, bytes, token: tokenName, ip, note });
+      record({ at: new Date().toISOString(), service: service.id, method, path, status, ms: Date.now() - started, bytes, token: tokenName, ip, note });
     };
 
     // A reachability check for the console and for whoever is debugging the
     // tunnel at the far end. It says that perch is listening and nothing else:
     // no version, no models, no token required.
-    if (method === 'GET' && (path === '/healthz' || path === '/')) {
-      send(res, 200, { ok: true, service: 'perch' });
+    // Reachability, for the console and for whoever is debugging the tunnel at
+    // the far end. It says perch is listening and which service this port is,
+    // and nothing else: no version, no models, no token required.
+    if (method === 'GET' && path === '/healthz') {
+      send(res, 200, { ok: true, service: 'perch', endpoint: service.id });
       finish(200);
       return;
     }
@@ -102,7 +78,7 @@ export function createProxyServer(): http.Server {
       return;
     }
 
-    const route = ROUTES.find((r) => r.method === method && r.path === path);
+    const route: Route | undefined = service.routes.find((r) => r.method === method && r.path === path);
     if (!route) {
       // Same answer whether the path is unknown to Ollama or simply not
       // allowed here — there is nothing to gain by helping a scanner map the
@@ -112,7 +88,8 @@ export function createProxyServer(): http.Server {
       return;
     }
 
-    const auth = authenticate(req.headers.authorization, route.scope);
+    const need: Scope = route.manage ? 'manage' : 'use';
+    const auth = authenticate(req.headers.authorization, need);
     if (!auth.ok) {
       if (auth.reason === 'scope') {
         // A real token that is not allowed this operation: worth saying so
@@ -130,7 +107,7 @@ export function createProxyServer(): http.Server {
     tokenName = auth.token!.name;
     noteAuthSuccess(ip);
 
-    if (route.scope === 'manage' && !loadState().settings.allowManage) {
+    if (route.manage && !loadState().settings.allowManage) {
       send(res, 403, { error: 'model management is switched off on this perch' });
       finish(403, 'manage off');
       return;
@@ -246,14 +223,14 @@ export function createProxyServer(): http.Server {
   return server;
 }
 
-/** For the console's status panel. */
+/** For the console's status panel. Shared across services. */
 export function proxyInFlight(): number {
   return inFlight;
 }
 
-/** The endpoints this perch will answer, for the console to show. */
-export function routeTable(): Array<{ method: string; path: string; scope: Scope }> {
-  return ROUTES.map(({ method, path, scope }) => ({ method, path, scope }));
+/** What a service will answer, for the console to show. */
+export function routeTable(service: ServiceDef): Array<{ method: string; path: string; scope: Scope }> {
+  return service.routes.map(({ method, path, manage }) => ({ method, path, scope: manage ? 'manage' : 'use' }));
 }
 
 /** Node's Readable, for tests that want to drive the server without a socket. */

@@ -37,6 +37,30 @@ export const config = {
   proxyPort: int('PERCH_PROXY_PORT', 11434),
   proxyBind: env('PERCH_PROXY_BIND', '127.0.0.1'),
 
+  // The other two model servers, each optional and each off unless its
+  // compose overlay is enabled. They get their own ports because Tern treats
+  // a transcriber as a different server from the writing model — and because
+  // one allowlist per API is the whole point.
+  voicePort: int('PERCH_VOICE_PORT', 11435),
+  imagePort: int('PERCH_IMAGE_PORT', 11436),
+
+  // The ports as published on the *host*, which are not always the ports perch
+  // listens on inside the container. compose maps host:container, so a machine
+  // that already had something on 11435 gets its dictation endpoint published
+  // somewhere else while the container carries on listening where it always
+  // did.
+  //
+  // The tunnel runs on the host, so it must forward from these, not from the
+  // listen ports. They match by default, which is exactly why getting this
+  // wrong would go unnoticed until somebody remapped a port.
+  hostChatPort: int('PERCH_HOST_CHAT_PORT', int('PERCH_PROXY_PORT', 11434)),
+  hostVoicePort: int('PERCH_HOST_VOICE_PORT', int('PERCH_VOICE_PORT', 11435)),
+  hostImagePort: int('PERCH_HOST_IMAGE_PORT', int('PERCH_IMAGE_PORT', 11436)),
+  whisperUrl: env('PERCH_WHISPER_URL', 'http://whisper:8080').replace(/\/+$/, ''),
+  sdUrl: env('PERCH_SD_URL', 'http://sd:7860').replace(/\/+$/, ''),
+  /** Comma-separated: which services listen at all. chat is always on. */
+  enabledServices: env('PERCH_SERVICES', 'chat'),
+
   // Where the real Ollama is. In the shipped compose file it is the sibling
   // container, which publishes no port of its own: the only way in is through
   // perch, so there is no unauthenticated back door on the LAN.
@@ -55,9 +79,10 @@ export const config = {
   upstreamIdleMs: int('PERCH_UPSTREAM_IDLE_MS', 15 * 60 * 1000),
 
   // Refuse absurd request bodies before reading them. A chat request carrying
-  // a long email thread is tens of kilobytes; 8 MB is room for images in a
-  // multimodal prompt and still far below "someone is filling my disk".
-  maxBodyBytes: int('PERCH_MAX_BODY_BYTES', 8 * 1024 * 1024),
+  // a long email thread is tens of kilobytes, but a minute of dictation is a
+  // couple of megabytes and an img2img source can be larger again — 64 MB is
+  // room for those and still far below "someone is filling my disk".
+  maxBodyBytes: int('PERCH_MAX_BODY_BYTES', 64 * 1024 * 1024),
 
   // A backstop, not a scheduler: how many generations may be in flight at
   // once across all tokens. Tern already paces itself against

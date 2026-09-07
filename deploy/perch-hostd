@@ -314,12 +314,12 @@ do_tunnel_configure() {
   local unit; unit="/etc/systemd/system/$(unit_for "$id")"
   [ -f "$conf" ] || { echo "no configuration for $id yet"; return 1; }
   [ -f "$tmpl" ] || { echo "missing $tmpl"; return 1; }
-  local HOST="" USER="" SSH_PORT="" REMOTE_BIND="" REMOTE_PORT="" LOCAL_PORT="" TOR_PROXY=""
+  local HOST="" USER="" SSH_PORT="" REMOTE_BIND="" REMOTE_PORT="" LOCAL_PORT="" TOR_PROXY="" FORWARDS=""
   while IFS='=' read -r k v; do
     case "$k" in
       HOST) HOST="$v" ;; USER) USER="$v" ;; SSH_PORT) SSH_PORT="$v" ;;
       REMOTE_BIND) REMOTE_BIND="$v" ;; REMOTE_PORT) REMOTE_PORT="$v" ;; LOCAL_PORT) LOCAL_PORT="$v" ;;
-      TOR_PROXY) TOR_PROXY="$v" ;;
+      TOR_PROXY) TOR_PROXY="$v" ;; FORWARDS) FORWARDS="$v" ;;
     esac
   done < "$conf"
 
@@ -340,6 +340,20 @@ do_tunnel_configure() {
     172.1[6-9].*|172.2[0-9].*|172.3[01].*) ;;
     *) echo "refusing to bind $REMOTE_BIND: not a private address"; return 2 ;;
   esac
+
+  # One -R per forwarded service. Every port is checked before it becomes part
+  # of a root-owned unit file; anything that is not a pair of plain numbers is
+  # refused rather than passed through.
+  local forward_opts="" pair lp rp
+  [ -n "$FORWARDS" ] || FORWARDS="$LOCAL_PORT:$REMOTE_PORT"
+  local IFS_SAVE="$IFS"; IFS=','
+  for pair in $FORWARDS; do
+    lp="${pair%%:*}"; rp="${pair##*:}"
+    [[ $lp =~ ^[0-9]{1,5}$ && $rp =~ ^[0-9]{1,5}$ ]] || { IFS="$IFS_SAVE"; echo "bad forward: $pair"; return 2; }
+    forward_opts+=" -R $REMOTE_BIND:$rp:127.0.0.1:$lp"
+  done
+  IFS="$IFS_SAVE"
+  [ -n "$forward_opts" ] || { echo "no forwards configured"; return 2; }
 
   local runas="$TUNNEL_USER"
   id "$runas" >/dev/null 2>&1 || runas=root
@@ -374,6 +388,7 @@ do_tunnel_configure() {
   sed -e "s|__ID__|$id|g" -e "s|__USER__|$USER|g" -e "s|__HOST__|$HOST|g" -e "s|__SSH_PORT__|$SSH_PORT|g" \
       -e "s|__REMOTE_BIND__|$REMOTE_BIND|g" -e "s|__REMOTE_PORT__|$REMOTE_PORT|g" \
       -e "s|__LOCAL_PORT__|$LOCAL_PORT|g" -e "s|__KEY_PATH__|$key|g" \
+      -e "s|__FORWARDS__|${forward_opts# }|g" \
       -e "s|__KEY_DIR__|$STATE_DIR/ssh/$id|g" -e "s|__RUNAS__|$runas|g" \
       -e "s|__PROXY_OPT__|$proxy_opt|g" -e "s|__ALIVE_INTERVAL__|$alive|g" \
       -e "s|__CONNECT_TIMEOUT__|$connect_timeout|g" -e "s|__RESTART_SEC__|$restart_sec|g" \

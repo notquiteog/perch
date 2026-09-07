@@ -37,11 +37,26 @@ export interface ConnectionStatus {
 }
 
 /** One SSH connection to one machine running Tern. */
+export interface ServiceInfo {
+  id: 'chat' | 'voice' | 'image';
+  label: string; blurb: string;
+  port: number; enabled: boolean;
+  overlay: string | null; ternField: string | null;
+  vramHintBytes: number;
+  routes: Array<{ method: string; path: string; scope: string }>;
+}
+
+export interface Forward { id: string; localPort: number; remotePort: number; label: string }
+export interface TernUrl { id: string; label: string; url: string; literal: string; ternField: string | null }
+
 export interface Connection {
   id: string; name: string;
   host: string; user: string; sshPort: number;
   remoteBind: string; remotePort: number;
   torProxy: string;
+  services: string[];
+  forwards: Forward[];
+  ternUrls: TernUrl[];
   keyPath: string; publicKey: string;
   createdAt: string; configuredAt: string | null; retiredAt: string | null;
   status: ConnectionStatus;
@@ -126,7 +141,7 @@ export const api = {
   deleteToken: (id: string) => request<{ ok: true }>(`/api/tokens/${id}`, { method: 'DELETE' }),
 
   connections: () => request<{ connections: Connection[]; endpointUp: boolean; localPort: number }>('/api/connections'),
-  createConnection: (body: { name: string; host: string; sshPort?: number; user?: string; remotePort?: number; torProxy?: string }) =>
+  createConnection: (body: { name: string; host: string; sshPort?: number; user?: string; remotePort?: number; torProxy?: string; services?: string[] }) =>
     request<{ connection: Connection }>('/api/connections', { method: 'POST', body: JSON.stringify(body) }),
   updateConnection: (id: string, body: Partial<Connection>) =>
     request<{ connection: Connection; applied: { ok: boolean; output: string } }>(`/api/connections/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
@@ -149,7 +164,8 @@ export const api = {
 
   settings: () => request<{
     settings: { allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean };
-    proxy: { routes: Array<{ method: string; path: string; scope: string }>; maxConcurrent: number; port: number };
+    services: ServiceInfo[];
+    proxy: { maxConcurrent: number; port: number };
     hostAvailable: boolean;
   }>('/api/settings'),
   saveSettings: (body: Partial<{ allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean }>) =>

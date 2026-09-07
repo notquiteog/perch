@@ -17,6 +17,27 @@ import { badRequest, notFound } from './http.js';
 
 const CONF_DIR = path.join(config.stateDir, 'tunnels');
 
+/**
+ * Which ports a connection carries, and where each lands.
+ *
+ * The far side's ports are consecutive from the chat port because every one of
+ * them must appear in that machine's permitlisten: three consecutive numbers
+ * is one thing to check, three arbitrary ones is three.
+ */
+export function forwardsFor(c: Connection): Array<{ id: string; localPort: number; remotePort: number; label: string }> {
+  // Host-side ports: the tunnel runs on the host, so it forwards from what
+  // compose published, not from what perch listens on inside the container.
+  const order: Array<{ id: string; port: number; label: string }> = [
+    { id: 'chat', port: config.hostChatPort, label: 'Chat' },
+    { id: 'voice', port: config.hostVoicePort, label: 'Dictation' },
+    { id: 'image', port: config.hostImagePort, label: 'Images' },
+  ];
+  return order
+    .map((svc, i) => ({ ...svc, offset: i }))
+    .filter((svc) => (c.services ?? ['chat']).includes(svc.id))
+    .map((svc) => ({ id: svc.id, localPort: svc.port, remotePort: c.remotePort + svc.offset, label: svc.label }));
+}
+
 // ---------- identity ----------
 
 /** A slug that is safe as a filename and as part of a systemd unit name. */
@@ -130,6 +151,10 @@ async function writeConf(conn: Connection): Promise<void> {
       `REMOTE_BIND=${conn.remoteBind}`,
       `REMOTE_PORT=${conn.remotePort}`,
       `LOCAL_PORT=${config.proxyPort}`,
+      // One line per forwarded service: "<local>:<remote>". The helper turns
+      // each into its own -R, so a connection that carries dictation as well
+      // as chat is one SSH session with two forwards rather than two tunnels.
+      `FORWARDS=${forwardsFor(conn).map((f) => `${f.localPort}:${f.remotePort}`).join(',')}`,
       `TOR_PROXY=${conn.torProxy}`,
       '',
     ].join('\n'),
@@ -228,6 +253,23 @@ export function ternBaseUrlLiteral(c: Connection): string {
   return `http://${c.remoteBind || '127.0.0.1'}:${c.remotePort}`;
 }
 
+/** One base URL per forwarded service, for the console to hand over. */
+export function ternUrls(c: Connection): Array<{ id: string; label: string; url: string; literal: string; ternField: string | null }> {
+  const host = !c.remoteBind || c.remoteBind === '127.0.0.1' ? '127.0.0.1' : 'host.containers.internal';
+  const fields: Record<string, string | null> = {
+    chat: 'Admin → AI model → Base URL',
+    voice: 'Admin → AI model → Dictation → Transcriber address',
+    image: null,
+  };
+  return forwardsFor(c).map((f) => ({
+    id: f.id,
+    label: f.label,
+    url: `http://${host}:${f.remotePort}`,
+    literal: `http://${c.remoteBind || '127.0.0.1'}:${f.remotePort}`,
+    ternField: fields[f.id] ?? null,
+  }));
+}
+
 const RAW = 'https://raw.githubusercontent.com/notquiteog/perch/main/deploy/tern-side-setup.sh';
 
 export function setupCommand(c: Connection): string | null {
@@ -238,7 +280,7 @@ export function setupCommand(c: Connection): string | null {
     '  | sudo bash -s --',
     `  --key ${JSON.stringify(key)}`,
     `  --user ${c.user}`,
-    `  --port ${c.remotePort}`,
+    `  --port ${forwardsFor(c).map((f) => f.remotePort).join(',')}`,
   ].join(' \\\n');
 }
 
@@ -248,7 +290,7 @@ export function setupManual(c: Connection): string {
     '# On the Tern box:',
     `curl -fsSLO ${RAW}`,
     'less tern-side-setup.sh          # read it first',
-    `sudo bash tern-side-setup.sh --key ${JSON.stringify(key)} --user ${c.user} --port ${c.remotePort}`,
+    `sudo bash tern-side-setup.sh --key ${JSON.stringify(key)} --user ${c.user} --port ${forwardsFor(c).map((f) => f.remotePort).join(',')}`,
   ].join('\n');
 }
 
@@ -281,7 +323,7 @@ export function sshCommandPreview(c: Connection): string {
         : '  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=15',
     `  -i ${c.keyPath}`,
     `  -p ${c.sshPort}`,
-    `  -R ${c.remoteBind || '127.0.0.1'}:${c.remotePort}:127.0.0.1:${config.proxyPort}`,
+    ...forwardsFor(c).map((f) => `  -R ${c.remoteBind || '127.0.0.1'}:${f.remotePort}:127.0.0.1:${f.localPort}`),
     `  ${c.user}@${c.host}`,
   ].join(' \\\n');
 }

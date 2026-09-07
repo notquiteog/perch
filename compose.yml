@@ -52,6 +52,11 @@ services:
       # A backstop rather than a scheduler: Tern paces itself against Ollama's
       # slot count, and this stops a runaway caller pinning the GPU.
       PERCH_MAX_CONCURRENT: ${PERCH_MAX_CONCURRENT:-4}
+      # What the host published this on, so the tunnel forwards the right port.
+      PERCH_HOST_CHAT_PORT: ${PERCH_PROXY_PORT:-11434}
+      # Which endpoints listen at all. The overlays add themselves to this via
+      # .env; a bare compose.yml is chat and nothing else.
+      PERCH_SERVICES: ${PERCH_SERVICES:-chat}
       PERCH_LOG_LEVEL: ${PERCH_LOG_LEVEL:-info}
     ports:
       # console

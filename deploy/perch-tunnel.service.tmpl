@@ -39,6 +39,11 @@ Group=__RUNAS__
 # probes at thirty seconds means a dead tunnel is noticed within 90 seconds
 # and restarted, rather than at whatever time you next try to write an email.
 #
+# The forward list below becomes one -R per service this connection carries:
+# chat always, dictation and images when they are enabled. One SSH session with several
+# forwards, rather than one tunnel per service — which would mean an account
+# and a key each on the far side for no gain.
+#
 # The third option below is where a SOCKS proxy goes when the tunnel dials out
 # through Tor. Note the doubled percent signs there: in a unit
 # file %h and %p are systemd's own specifiers — the user's home directory and
@@ -57,7 +62,7 @@ ExecStart=/usr/bin/ssh -NT \
   -o ConnectTimeout=__CONNECT_TIMEOUT__ \
   -i __KEY_PATH__ \
   -p __SSH_PORT__ \
-  -R __REMOTE_BIND__:__REMOTE_PORT__:127.0.0.1:__LOCAL_PORT__ \
+  __FORWARDS__ \
   __USER__@__HOST__
 
 Restart=always

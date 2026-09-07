@@ -1,0 +1,50 @@
+# Optional overlay: image generation.
+#
+# Stable Diffusion behind an A1111-compatible HTTP API. perch exposes only the
+# generation endpoints and the read-only queries needed to drive them — the
+# rest of that API is mostly concerned with reconfiguring the server, which is
+# not something a token from another machine should be able to do.
+#
+# Nothing in Tern uses this. It is here for anything else on your network that
+# wants a local image model, and it is off unless you ask for it.
+#
+# What it costs, and why it is the awkward one. An SD 1.5 checkpoint is around
+# 4 GB resident; SDXL is nearer 10. On a 16 GB card already holding a 12B chat
+# model at 8 GB, SD 1.5 fits and SDXL does not — and when it does not fit, it
+# does not fail, it spills to system memory and takes minutes per image. The
+# console's Services panel adds up what you have enabled and says so.
+#
+# The image is community-maintained rather than official; upstream publishes no
+# container. Pin a digest if that matters to you.
+services:
+  sd:
+    image: ${SD_IMAGE:-docker.io/universonic/stable-diffusion-webui:latest}
+    restart: unless-stopped
+    # --api turns on the /sdapi routes; --nowebui drops the browser UI, which
+    # perch does not proxy and which has no business listening at all.
+    # --medvram keeps it inside a card that is also holding a chat model.
+    command: >-
+      --listen --port 7860 --api --nowebui
+      --medvram --no-half-vae --skip-version-check
+    environment:
+      COMMANDLINE_ARGS: ""
+    volumes:
+      - perch-sd-models:/app/stable-diffusion-webui/models:z
+      - perch-sd-outputs:/app/stable-diffusion-webui/outputs:z
+    # Never published to the host, same as the others.
+    mem_limit: ${SD_MEM_LIMIT:-12g}
+
+  perch:
+    ports:
+      # Loopback only, like every other perch port: the tunnel picks it up from
+      # there and it never exists on another interface.
+      - "127.0.0.1:${PERCH_IMAGE_PORT:-11436}:11436"
+    environment:
+      PERCH_HOST_IMAGE_PORT: ${PERCH_IMAGE_PORT:-11436}
+      PERCH_SD_URL: http://sd:7860
+    depends_on:
+      - sd
+
+volumes:
+  perch-sd-models:
+  perch-sd-outputs:

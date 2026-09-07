@@ -10,6 +10,8 @@ import { config } from './config.js';
 
 export interface ActivityEntry {
   at: string;
+  /** Which endpoint it came through: chat, voice or image. */
+  service: string;
   method: string;
   path: string;
   status: number;

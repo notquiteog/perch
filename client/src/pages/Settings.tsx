@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, relative, type TokenRecord } from '../api';
+import { api, human, relative, type ServiceInfo, type TokenRecord } from '../api';
 import { Card, CodeBlock, Empty, Notice, Spinner, Tag, Toggle } from '../components/ui';
 
 export default function Settings() {
   const [tokens, setTokens] = useState<TokenRecord[]>([]);
   const [settings, setSettings] = useState<{ allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean } | null>(null);
-  const [routes, setRoutes] = useState<Array<{ method: string; path: string; scope: string }>>([]);
+  const [services, setServices] = useState<ServiceInfo[]>([]);
   const [proxyInfo, setProxyInfo] = useState<{ maxConcurrent: number; port: number } | null>(null);
   const [passwordSet, setPasswordSet] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -20,7 +20,7 @@ export default function Settings() {
     const [tk, st, se] = await Promise.all([api.tokens(), api.settings(), api.session()]);
     setTokens(tk.tokens);
     setSettings(st.settings);
-    setRoutes(st.proxy.routes);
+    setServices(st.services);
     setProxyInfo({ maxConcurrent: st.proxy.maxConcurrent, port: st.proxy.port });
     setKeepAlive(st.settings.keepAlive);
     setPasswordSet(se.passwordSet);
@@ -174,27 +174,57 @@ export default function Settings() {
       </Card>
 
       <Card
-        title="What the tunnel exposes"
-        sub={`Every endpoint reachable from the Tern box, and nothing else. Anything not on this list answers 404 whatever token it is given. At most ${proxyInfo?.maxConcurrent ?? '—'} generations run at once.`}
+        title="Services"
+        sub="Each is a separate endpoint on its own port, with its own allowlist. Switching one on is a compose overlay and a re-run of the installer; they are off by default because each is another claim on the same GPU."
       >
-        <table>
-          <thead><tr><th>Method</th><th>Path</th><th className="right">Needs</th></tr></thead>
-          <tbody>
-            {routes.map((r) => (
-              <tr key={`${r.method} ${r.path}`}>
-                <td className="mono" style={{ width: 80 }}>{r.method}</td>
-                <td className="mono">{r.path}</td>
-                <td className="right">{r.scope === 'manage' ? <Tag tone="accent">manage</Tag> : <Tag>use</Tag>}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <p className="sub" style={{ marginTop: 12, marginBottom: 0 }}>
-          Ollama&apos;s own API is wider than this. <span className="mono">/api/create</span> and{' '}
-          <span className="mono">/api/push</span> can write a model onto this machine or ship one off it,
-          so they are not in the table and cannot be reached.
+        {services.map((svc) => (
+          <div key={svc.id} style={{ borderTop: '1px solid var(--line)', paddingTop: 12, marginTop: 12 }}>
+            <div className="row between">
+              <div>
+                <strong>{svc.label}</strong>{' '}
+                {svc.enabled ? <Tag tone="good">on, port {svc.port}</Tag> : <Tag>off</Tag>}
+                {svc.id === 'chat' && <Tag tone="accent">always on</Tag>}
+              </div>
+              <span className="hint mono">~{human(svc.vramHintBytes)} on the card</span>
+            </div>
+            <p className="sub" style={{ margin: '6px 0 0' }}>{svc.blurb}</p>
+            {svc.ternField && (
+              <p className="hint" style={{ margin: '4px 0 0' }}>
+                Goes in Tern under <span className="mono">{svc.ternField}</span>.
+              </p>
+            )}
+            {!svc.enabled && svc.overlay && (
+              <p className="hint" style={{ margin: '4px 0 0' }}>
+                To switch on: re-run <span className="mono">sudo ./install.sh</span> and say yes, or add{' '}
+                <span className="mono">{svc.overlay}</span> to COMPOSE_FILE in .env.
+              </p>
+            )}
+            <details style={{ marginTop: 8 }}>
+              <summary style={{ cursor: 'pointer', color: 'var(--ink-dim)', fontSize: 12.5 }}>
+                What it exposes ({svc.routes.length} endpoint{svc.routes.length === 1 ? '' : 's'})
+              </summary>
+              <table style={{ marginTop: 8 }}>
+                <tbody>
+                  {svc.routes.map((r) => (
+                    <tr key={`${r.method} ${r.path}`}>
+                      <td className="mono" style={{ width: 80 }}>{r.method}</td>
+                      <td className="mono">{r.path}</td>
+                      <td className="right">{r.scope === 'manage' ? <Tag tone="accent">manage</Tag> : <Tag>use</Tag>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          </div>
+        ))}
+        <p className="sub" style={{ marginTop: 14, marginBottom: 0 }}>
+          Anything not listed above answers 404 whatever token it is given. Enabled services want{' '}
+          <strong>{human(services.filter((s) => s.enabled).reduce((n, s) => n + s.vramHintBytes, 0))}</strong>{' '}
+          between them — if that is more than the card has, whichever was used last holds it and the
+          others fall back to system memory.
         </p>
       </Card>
+
     </>
   );
 }

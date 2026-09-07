@@ -34,10 +34,11 @@ process.env.PERCH_AUTH_FAIL_LIMIT = '3';
 process.env.PERCH_LOG_LEVEL = 'error';
 
 const { createProxyServer } = await import('./proxy.js');
+const { serviceById } = await import('./services.js');
 const { mintToken, revokeToken, resetAuthFailures } = await import('./auth.js');
 const { throughput, reset: resetMetrics } = await import('./metrics.js');
 
-const proxy = createProxyServer();
+const proxy = createProxyServer({ ...serviceById('chat'), upstream: `http://127.0.0.1:${upstreamPort}` });
 await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
 const port = (proxy.address() as { port: number }).port;
 const base = `http://127.0.0.1:${port}`;
@@ -53,7 +54,8 @@ test('healthz needs no token and says nothing useful to a scanner', async () => 
   const res = await call('/healthz');
   assert.equal(res.status, 200);
   const body = await res.json() as Record<string, unknown>;
-  assert.deepEqual(Object.keys(body).sort(), ['ok', 'service']);
+  // Which endpoint this port is, and that perch is up. No version, no models.
+  assert.deepEqual(Object.keys(body).sort(), ['endpoint', 'ok', 'service']);
 });
 
 test('a request with no token is refused', async () => {
@@ -172,7 +174,9 @@ test('an oversized body is refused on the header, before any of it is read', asy
         headers: {
           Authorization: `Bearer ${useToken}`,
           'Content-Type': 'application/json',
-          'Content-Length': String(9 * 1024 * 1024),
+          // Above the 64 MB limit, which is sized for a minute of dictation
+          // audio and an img2img source rather than for text.
+          'Content-Length': String(70 * 1024 * 1024),
         },
       },
       (res) => { res.resume(); resolve(res.statusCode ?? 0); },
@@ -182,6 +186,48 @@ test('an oversized body is refused on the header, before any of it is read', asy
     // Deliberately not ended: the answer should arrive anyway.
   });
   assert.equal(status, 413);
+});
+
+// Each service exposes its own API and only its own. The chat port must not
+// accept a transcription, and the voice port must not accept a chat — the
+// allowlist is per service, not one shared list with a filter on top.
+test('a service refuses another service\'s endpoints', async () => {
+  resetAuthFailures();
+  const onChat = await call('/v1/audio/transcriptions', {
+    method: 'POST', headers: { Authorization: `Bearer ${useToken}` },
+  });
+  assert.equal(onChat.status, 404, 'the chat port must not accept transcription');
+
+  const voice = createProxyServer({ ...serviceById('voice'), upstream: `http://127.0.0.1:${upstreamPort}` });
+  await new Promise<void>((resolve) => voice.listen(0, '127.0.0.1', resolve));
+  const vPort = (voice.address() as { port: number }).port;
+  const onVoice = await fetch(`http://127.0.0.1:${vPort}/api/chat`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${useToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'x', messages: [] }),
+  });
+  assert.equal(onVoice.status, 404, 'the voice port must not accept chat');
+
+  const allowed = await fetch(`http://127.0.0.1:${vPort}/v1/audio/transcriptions`, {
+    method: 'POST', headers: { Authorization: `Bearer ${useToken}` },
+  });
+  assert.equal(allowed.status, 200, 'the voice port must accept its own endpoint');
+  voice.close();
+});
+
+test('the image service exposes generation but not the rest of the A1111 API', async () => {
+  const image = createProxyServer({ ...serviceById('image'), upstream: `http://127.0.0.1:${upstreamPort}` });
+  await new Promise<void>((resolve) => image.listen(0, '127.0.0.1', resolve));
+  const port2 = (image.address() as { port: number }).port;
+  const hit = (p: string, m = 'POST'): Promise<Response> =>
+    fetch(`http://127.0.0.1:${port2}${p}`, { method: m, headers: { Authorization: `Bearer ${useToken}` } });
+
+  assert.equal((await hit('/sdapi/v1/txt2img')).status, 200);
+  // These reconfigure the server or run code on it. Not exposed.
+  for (const p of ['/sdapi/v1/options', '/sdapi/v1/refresh-checkpoints', '/sdapi/v1/reload-checkpoint', '/docs']) {
+    assert.equal((await hit(p)).status, 404, `${p} must not be routable`);
+  }
+  image.close();
 });
 
 test.after(() => {

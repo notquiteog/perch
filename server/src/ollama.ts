@@ -81,9 +81,24 @@ export async function deleteModel(name: string): Promise<void> {
  */
 export async function loadModel(name: string): Promise<void> {
   const keepAlive = loadState().settings.keepAlive || '10m';
+  // An empty prompt with a keep_alive is Ollama's idiom for "load this and
+  // hold it". It does not work for embedding models: they have no generate
+  // endpoint and answer "does not support generate", which surfaced as an
+  // unhandled error the moment somebody pressed Load on all-minilm. Warm those
+  // through /api/embed instead, which is the only thing they do.
   const res = await call('/api/generate', { method: 'POST', body: JSON.stringify({ model: name, keep_alive: keepAlive }) }, 300_000);
-  if (!res.ok) throw new Error(`could not load ${name}: ${(await res.text()).slice(0, 200)}`);
-  await res.text();
+  if (res.ok) { await res.text(); return; }
+
+  const detail = (await res.text()).slice(0, 300);
+  if (/does not support generate/i.test(detail)) {
+    const embed = await call('/api/embed', {
+      method: 'POST',
+      body: JSON.stringify({ model: name, input: '', keep_alive: keepAlive }),
+    }, 300_000);
+    if (embed.ok) { await embed.text(); return; }
+    throw new Error(`could not load ${name}: ${(await embed.text()).slice(0, 200)}`);
+  }
+  throw new Error(`could not load ${name}: ${detail.slice(0, 200)}`);
 }
 
 /**
@@ -93,8 +108,15 @@ export async function loadModel(name: string): Promise<void> {
  */
 export async function unloadModel(name: string): Promise<void> {
   const res = await call('/api/generate', { method: 'POST', body: JSON.stringify({ model: name, keep_alive: 0 }) }, 30_000);
-  if (!res.ok) throw new Error(`could not unload ${name}: ${(await res.text()).slice(0, 200)}`);
-  await res.text();
+  if (res.ok) { await res.text(); return; }
+  // Same asymmetry as loading: an embedding model is dropped through the
+  // endpoint it actually has.
+  const detail = (await res.text()).slice(0, 300);
+  if (/does not support generate/i.test(detail)) {
+    const embed = await call('/api/embed', { method: 'POST', body: JSON.stringify({ model: name, input: '', keep_alive: 0 }) }, 30_000);
+    if (embed.ok) { await embed.text(); return; }
+  }
+  throw new Error(`could not unload ${name}: ${detail.slice(0, 200)}`);
 }
 
 export interface PullProgress {

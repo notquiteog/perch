@@ -206,7 +206,62 @@ ask PERCH_PROXY_PORT   "Model endpoint port (on 127.0.0.1)" "${PERCH_PROXY_PORT:
 ask OLLAMA_NUM_PARALLEL "Requests answered at once" "${OLLAMA_NUM_PARALLEL:-$SLOTS}"
 ask AI_MODEL "Model to download now (blank to choose later in the console)" "${AI_MODEL:-$SUGGESTED_MODEL}"
 
+# The two optional services. Both cost memory on the same card the chat model
+# is using, so they are off unless asked for, and the numbers are stated rather
+# than discovered later when generation mysteriously halves in speed.
+step "Optional services"
+note "Both are off by default. Each is a second claim on the same GPU."
+ask_yn VOICE_ENABLED "Add dictation (whisper.cpp, ~0.4-1 GB, runs fine on the CPU)?" "${VOICE_ENABLED:-n}"
+if [ "$VOICE_ENABLED" = y ]; then
+  # Same RAM check as the chat model: base fits anywhere, small is better on
+  # accents and names.
+  if [ "$RAM_GB" -ge 8 ]; then WHISPER_DEFAULT=small; else WHISPER_DEFAULT=base; fi
+  ask WHISPER_MODEL "Whisper model (base or small)" "${WHISPER_MODEL:-$WHISPER_DEFAULT}"
+fi
+ask_yn IMAGE_ENABLED "Add image generation (Stable Diffusion, 4-10 GB on the card)?" "${IMAGE_ENABLED:-n}"
+if [ "$IMAGE_ENABLED" = y ]; then
+  IMAGE_NEED=4500
+  if [ "$USABLE_MB" -lt $(( IMAGE_NEED + 9400 )) ]; then
+    warn "this card has ${USABLE_MB} MB usable; a chat model plus Stable Diffusion wants about $(( IMAGE_NEED + 9400 )) MB"
+    note "they will not both stay resident — whichever was used last will hold the card"
+    note "the console's Services panel shows the running total"
+  fi
+fi
+
+PERCH_SERVICES="chat"
+[ "$VOICE_ENABLED" = y ] && PERCH_SERVICES="$PERCH_SERVICES,voice"
+[ "$IMAGE_ENABLED" = y ] && PERCH_SERVICES="$PERCH_SERVICES,image"
+ok "services: $PERCH_SERVICES"
+
+# Every service wants a port on loopback, and a machine that already runs
+# containers may well be using one. Finding that out at `up` time means a
+# container that will not start and an error a long way from its cause, so the
+# check happens here and moves to the next free port instead.
+port_free() { ! ss -lntH 2>/dev/null | grep -q "127.0.0.1:$1 \|0.0.0.0:$1 \|\*:$1 "; }
+next_free() {
+  local p="$1"
+  while ! port_free "$p"; do p=$(( p + 1 )); done
+  printf '%s' "$p"
+}
+for spec in "PERCH_CONSOLE_PORT console" "PERCH_PROXY_PORT chat" "PERCH_VOICE_PORT dictation" "PERCH_IMAGE_PORT images"; do
+  var="${spec%% *}"; label="${spec##* }"
+  case "$label" in
+    dictation) [ "$VOICE_ENABLED" = y ] || continue ;;
+    images)    [ "$IMAGE_ENABLED" = y ] || continue ;;
+  esac
+  current="${!var}"
+  if ! port_free "$current"; then
+    replacement="$(next_free $(( current + 1 )))"
+    warn "port $current is already in use, so $label would not start"
+    note "using $replacement instead; change $var in .env if you would rather move the other thing"
+    printf -v "$var" '%s' "$replacement"
+  fi
+done
+ok "ports: console $PERCH_CONSOLE_PORT, chat $PERCH_PROXY_PORT${VOICE_ENABLED:+, dictation $PERCH_VOICE_PORT}${IMAGE_ENABLED:+, images $PERCH_IMAGE_PORT}"
+
 COMPOSE_FILE="compose.yml"
+[ "$VOICE_ENABLED" = y ] && COMPOSE_FILE="$COMPOSE_FILE:compose.voice.yml"
+[ "$IMAGE_ENABLED" = y ] && COMPOSE_FILE="$COMPOSE_FILE:compose.image.yml"
 case "$GPU_KIND" in
   nvidia)
     case "$GPU_MODE" in
@@ -256,6 +311,12 @@ PERCH_CONSOLE_PORT=$PERCH_CONSOLE_PORT
 PERCH_PROXY_PORT=$PERCH_PROXY_PORT
 PERCH_STATE_DIR=$PERCH_STATE_DIR
 PERCH_MAX_CONCURRENT=$(( OLLAMA_NUM_PARALLEL + 2 ))
+# Which endpoints listen at all. A machine that only writes email should not
+# have an image generator on a port.
+PERCH_SERVICES=$PERCH_SERVICES
+PERCH_VOICE_PORT=${PERCH_VOICE_PORT:-11435}
+PERCH_IMAGE_PORT=${PERCH_IMAGE_PORT:-11436}
+WHISPER_MODEL=${WHISPER_MODEL:-base}
 PERCH_LOG_LEVEL=info
 PERCH_VERSION=0.1.0
 

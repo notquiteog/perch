@@ -1,0 +1,71 @@
+# Optional overlay: dictation.
+#
+# whisper.cpp behind its bundled HTTP server, which speaks the same shape as
+# OpenAI's /v1/audio/transcriptions — so Tern talks to it with no adapter, and
+# perch's allowlist for it is a single endpoint.
+#
+# Off unless the installer was told to add it. On a machine already holding a
+# chat model this is the second claim on the card, and the two do not always
+# both fit.
+#
+# What it costs. `base` is 150 MB of weights and roughly 400 MB while
+# transcribing; `small` is 500 MB and about a gigabyte in use, and is
+# noticeably better on accents and on names. It runs perfectly well on the CPU
+# for dictation-length clips, which on a machine with cores to spare is the
+# right answer — it leaves the whole card for the writing model.
+#
+# What it does not do. No audio is written to disk. The volume here holds model
+# weights and nothing else: no clip and no transcript is ever written to it,
+# and perch streams the audio through without reading it.
+services:
+  whisper:
+    # Upstream publishes to GHCR, not Docker Hub, and the project moved from
+    # ggerganov/ to ggml-org/. There is no whisper.cpp repository on Docker Hub
+    # at all, so a docker.io reference here fails the pull outright.
+    image: ${WHISPER_IMAGE:-ghcr.io/ggml-org/whisper.cpp:main}
+    restart: unless-stopped
+    # The image's entrypoint is `bash -c`, so the command has to arrive as a
+    # ONE-element list: a plain multi-token `command:` is split into argv and
+    # bash then takes only the first word as the script, silently dropping
+    # every flag after it — the server would come up on 127.0.0.1 with the
+    # default model path and be both unreachable and modelless.
+    #
+    # First start downloads the weights into the volume. Doing it here rather
+    # than from install.sh is what makes the container able to start at all:
+    # whisper-server exits 3 when the model file is missing, so anything that
+    # waits for a healthy container before fetching the model can never get
+    # there. It also repairs a volume that was pruned, on a plain `up`.
+    #
+    # --inference-path moves the transcribe route from whisper.cpp's own
+    # /inference to the OpenAI path Tern posts to; without it every dictation
+    # gets a 404. --convert accepts whatever the browser recorded (WebM/Opus,
+    # MP4, Ogg) rather than only 16 kHz PCM; ffmpeg is in the image.
+    command:
+      - >-
+        test -s /models/ggml-${WHISPER_MODEL:-base}.bin ||
+        ./models/download-ggml-model.sh ${WHISPER_MODEL:-base} /models;
+        exec ./build/bin/whisper-server
+        --model /models/ggml-${WHISPER_MODEL:-base}.bin
+        --host 0.0.0.0 --port 8080
+        --threads ${WHISPER_THREADS:-4}
+        --inference-path /v1/audio/transcriptions
+        --convert
+    volumes:
+      - perch-whisper:/models:z
+    # Never published to the host. perch reaches it over the compose network,
+    # and nothing outside this box can send it audio.
+    mem_limit: ${WHISPER_MEM_LIMIT:-2g}
+
+  perch:
+    ports:
+      # Loopback only, like every other perch port: the tunnel picks it up from
+      # there and it never exists on another interface.
+      - "127.0.0.1:${PERCH_VOICE_PORT:-11435}:11435"
+    environment:
+      PERCH_HOST_VOICE_PORT: ${PERCH_VOICE_PORT:-11435}
+      PERCH_WHISPER_URL: http://whisper:8080
+    depends_on:
+      - whisper
+
+volumes:
+  perch-whisper:

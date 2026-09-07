@@ -50,7 +50,15 @@ export interface Connection {
    * what the generated setup script works out. See docs/REMOTE.md.
    */
   remoteBind: string;
+  /**
+   * The chat endpoint's port on the far side. The other services follow it:
+   * voice at +1, image at +2. Consecutive rather than configurable because
+   * every one of them has to be named in the far side's permitlisten, and
+   * three arbitrary numbers is three more things to get wrong.
+   */
   remotePort: number;
+  /** Which services this connection forwards. Always includes chat. */
+  services: string[];
   /**
    * A SOCKS5 proxy to dial out through, as host:port — in practice Tor's
    * 127.0.0.1:9050. Empty means connect directly.
@@ -115,6 +123,7 @@ export function newConnection(partial: Partial<Connection> & { id: string }): Co
     sshPort: partial.sshPort ?? 22,
     remoteBind: partial.remoteBind ?? '',
     remotePort: partial.remotePort ?? 11434,
+    services: partial.services?.length ? Array.from(new Set(['chat', ...partial.services])) : ['chat'],
     torProxy: partial.torProxy ?? '',
     keyPath: keyPathFor(partial.id),
     publicKey: partial.publicKey ?? '',

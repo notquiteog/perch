@@ -16,7 +16,7 @@ export default function Connect() {
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: 'good' | 'bad' | 'info'; text: string } | null>(null);
   const [open, setOpen] = useState<string | null>(null);
-  const [form, setForm] = useState({ name: '', host: '', sshPort: 22, user: 'perch', remotePort: 11434, torProxy: '' });
+  const [form, setForm] = useState({ name: '', host: '', sshPort: 22, user: 'perch', remotePort: 11434, torProxy: '', services: ['chat'] as string[] });
 
   const refresh = useCallback(async () => {
     const [c, tk] = await Promise.all([api.connections(), api.tokens()]);
@@ -114,11 +114,38 @@ export default function Connect() {
               <span className="hint">127.0.0.1:9050 for Tor.</span>
             </div>
           </div>
+          <div className="field" style={{ maxWidth: 700, marginTop: 4 }}>
+            <label>What this connection carries</label>
+            <div className="row">
+              {[['chat', 'Chat'], ['voice', 'Dictation'], ['image', 'Images']].map(([id, label]) => (
+                <label key={id} className="row" style={{ gap: 6, fontSize: 12.5, color: 'var(--ink-dim)' }}>
+                  <input
+                    type="checkbox"
+                    style={{ width: 'auto' }}
+                    checked={form.services.includes(id!)}
+                    disabled={id === 'chat'}
+                    onChange={(e) => setForm({
+                      ...form,
+                      services: e.target.checked
+                        ? [...form.services, id!]
+                        : form.services.filter((x) => x !== id),
+                    })}
+                  />
+                  {label}{id === 'chat' && ' (always)'}
+                </label>
+              ))}
+            </div>
+            <span className="hint">
+              One SSH session carries all of them, on consecutive ports from the one above —
+              so {form.remotePort}{form.services.length > 1 ? ` to ${form.remotePort + form.services.length - 1}` : ''} on
+              the far side. Only services enabled on this machine can be carried.
+            </span>
+          </div>
           <button className="primary" disabled={busy !== null || !form.host || !form.name}
             onClick={() => void run('add', async () => {
               await api.createConnection(form);
               setAdding(false);
-              setForm({ name: '', host: '', sshPort: 22, user: 'perch', remotePort: 11434, torProxy: '' });
+              setForm({ name: '', host: '', sshPort: 22, user: 'perch', remotePort: 11434, torProxy: '', services: ['chat'] });
             }, 'Connection created, with a key. Open it to finish setup.')}>
             {busy === 'add' ? <Spinner /> : 'Create'}
           </button>
@@ -201,6 +228,7 @@ function ConnectionCard({ c, open, busy, onToggle, onRun, setMessage }: {
             {running ? <Tag tone="good">running</Tag> : paired ? <Tag tone="bad">{c.status.active}</Tag> : <Tag>setup unfinished</Tag>}
             {c.status.enabled === 'enabled' && <Tag tone="good">starts at boot</Tag>}
             {c.torProxy && <Tag tone="accent">over Tor</Tag>}
+            {c.forwards.length > 1 && <Tag>{c.forwards.map((f) => f.label).join(' + ')}</Tag>}
             {paired && <span className="hint mono">→ {c.remoteBind}:{c.remotePort}</span>}
           </div>
         </div>
@@ -209,8 +237,15 @@ function ConnectionCard({ c, open, busy, onToggle, onRun, setMessage }: {
 
       {paired && running && (
         <div style={{ marginTop: 12 }}>
-          <p className="sub" style={{ marginBottom: 6 }}>Tern&apos;s base URL, for Admin → AI model:</p>
-          <CodeBlock text={c.ternBaseUrl} />
+          {c.ternUrls.map((u) => (
+            <div key={u.id} style={{ marginBottom: 10 }}>
+              <p className="sub" style={{ marginBottom: 5 }}>
+                <strong>{u.label}</strong>
+                {u.ternField ? <> — {u.ternField}</> : <> — nothing in Tern uses this one</>}
+              </p>
+              <CodeBlock text={u.url} />
+            </div>
+          ))}
         </div>
       )}
 

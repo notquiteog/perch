@@ -27,6 +27,13 @@ listening on your home connection, and no third party in the middle.
 
 ## What you get
 
+**Three endpoints, each optional.** Chat (Ollama) is always on; dictation
+(whisper.cpp) and image generation (Stable Diffusion) are off until you ask for
+them. Each is a separate port with its own allowlist, and one SSH session
+carries whichever you enable. They share a GPU, so the console adds up what
+they want and tells you when the set will not fit — see
+[docs/SERVICES.md](docs/SERVICES.md).
+
 **A model endpoint Tern can use.** An Ollama-compatible API that requires a
 bearer token, exposing exactly the fourteen endpoints Tern actually calls and
 refusing everything else. Streaming passes straight through, so drafts still
@@ -259,6 +266,7 @@ including what perch does *not* protect against.
 | | |
 |---|---|
 | [SETUP.md](docs/SETUP.md) | Installing, in more detail than the installer gives you |
+| [SERVICES.md](docs/SERVICES.md) | Chat, dictation and images: what each exposes, and why they share one app |
 | [REMOTE.md](docs/REMOTE.md) | The tunnel: how it works, how to do it by hand, why each option is there |
 | [TERN.md](docs/TERN.md) | Pointing Tern at perch, and choosing a model for email |
 | [SECURITY.md](docs/SECURITY.md) | Threat model, what is exposed, what is not |

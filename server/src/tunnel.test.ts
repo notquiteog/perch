@@ -149,4 +149,51 @@ test('forgetting drops the record for good', () => {
   assert.equal(t.listConnections().some((c) => c.id === retired.id), false);
 });
 
+// One SSH session carries every service the connection is set up for, on
+// consecutive ports, because each has to be named in the far side's
+// permitlisten and consecutive numbers are one thing to check rather than
+// three.
+test('a chat-only connection forwards one port', async () => {
+  const c = await t.createConnection({ name: 'Chat only', host: 'chatonly.example.com', remotePort: 11434 });
+  const f = t.forwardsFor(c);
+  assert.equal(f.length, 1);
+  assert.deepEqual(f.map((x) => [x.id, x.remotePort]), [['chat', 11434]]);
+});
+
+test('adding dictation and images adds consecutive ports', async () => {
+  const c = await t.createConnection({
+    name: 'Everything', host: 'everything.example.com', remotePort: 11500,
+    services: ['chat', 'voice', 'image'],
+  });
+  assert.deepEqual(t.forwardsFor(c).map((x) => [x.id, x.remotePort]),
+    [['chat', 11500], ['voice', 11501], ['image', 11502]]);
+});
+
+test('chat is always carried, even if a caller omits it', async () => {
+  const c = await t.createConnection({ name: 'Voice only', host: 'voiceonly.example.com', services: ['voice'] });
+  assert.ok(t.forwardsFor(c).some((f) => f.id === 'chat'), 'chat must always be forwarded');
+});
+
+test('the setup command permitlists every forwarded port', async () => {
+  const c = t.listConnections().find((x) => x.name === 'Everything')!;
+  const cmd = t.setupCommand({ ...c, publicKey: 'ssh-ed25519 AAAA test' });
+  assert.match(cmd!, /--port 11500,11501,11502/);
+});
+
+test('the ssh command has one -R per service', () => {
+  const c = t.listConnections().find((x) => x.name === 'Everything')!;
+  const preview = t.sshCommandPreview({ ...c, remoteBind: '10.89.0.1' });
+  assert.equal((preview.match(/-R /g) ?? []).length, 3);
+  assert.match(preview, /-R 10\.89\.0\.1:11501:127\.0\.0\.1:/);
+});
+
+test('Tern gets a URL per service, and knows where each one goes', () => {
+  const c = t.listConnections().find((x) => x.name === 'Everything')!;
+  const urls = t.ternUrls({ ...c, remoteBind: '10.89.0.1' });
+  assert.deepEqual(urls.map((u) => u.id), ['chat', 'voice', 'image']);
+  assert.match(urls[0]!.url, /host\.containers\.internal:11500$/);
+  assert.match(urls[1]!.ternField!, /Transcriber/);
+  assert.equal(urls[2]!.ternField, null, 'Tern has no image setting to point at');
+});
+
 test.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));

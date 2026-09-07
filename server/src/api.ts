@@ -16,6 +16,7 @@ import * as ollama from './ollama.js';
 import { hostAvailable, readHostStatus, runHostAction, HostUnavailable, type HostAction } from './host.js';
 import { sizing, MODELS, EMBED_MODELS, UNCENSORED_MODELS, human } from './system.js';
 import { proxyInFlight, routeTable } from './proxy.js';
+import { SERVICES, SERVICE_VRAM_HINT } from './services.js';
 import { throughput } from './metrics.js';
 import { recent, summary } from './activity.js';
 import * as tunnel from './tunnel.js';
@@ -349,6 +350,8 @@ export function buildApi(): Router {
     publicKey: tunnel.publicKeyOf(c),
     ternBaseUrl: tunnel.ternBaseUrl(c),
     ternBaseUrlLiteral: tunnel.ternBaseUrlLiteral(c),
+    forwards: tunnel.forwardsFor(c),
+    ternUrls: tunnel.ternUrls(c),
     setupCommand: tunnel.setupCommand(c),
     setupManual: tunnel.setupManual(c),
     uninstallCommand: tunnel.uninstallCommand(c),
@@ -374,6 +377,7 @@ export function buildApi(): Router {
       sshPort: typeof b.sshPort === 'number' ? b.sshPort : undefined,
       remotePort: typeof b.remotePort === 'number' ? b.remotePort : undefined,
       torProxy: typeof b.torProxy === 'string' ? b.torProxy.trim() : undefined,
+      services: Array.isArray(b.services) ? (b.services as string[]).filter((x) => ['chat', 'voice', 'image'].includes(x)) : undefined,
     });
     sendJson(ctx.res, 201, { connection: shape(conn) });
   });
@@ -394,6 +398,7 @@ export function buildApi(): Router {
       remoteBind: typeof b.remoteBind === 'string' ? b.remoteBind.trim() : undefined,
       remotePort: typeof b.remotePort === 'number' ? b.remotePort : undefined,
       torProxy: typeof b.torProxy === 'string' ? b.torProxy.trim() : undefined,
+      services: Array.isArray(b.services) ? (b.services as string[]).filter((x) => ['chat', 'voice', 'image'].includes(x)) : undefined,
     });
     const applied = await hostAction('tunnel.configure', conn.id, 30_000).catch((e: HttpError) => ({ ok: false, output: e.message }));
     sendJson(ctx.res, 200, { connection: shape(tunnel.getConnection(conn.id)), applied });
@@ -515,9 +520,22 @@ export function buildApi(): Router {
 
   r.get('/api/settings', (ctx) => {
     requireConsole(ctx);
+    const wanted = new Set(config.enabledServices.split(',').map((x) => x.trim()).filter(Boolean));
+    wanted.add('chat');
     sendJson(ctx.res, 200, {
       settings: loadState().settings,
-      proxy: { routes: routeTable(), maxConcurrent: config.maxConcurrent, port: config.proxyPort },
+      services: SERVICES.map((svc) => ({
+        id: svc.id,
+        label: svc.label,
+        blurb: svc.blurb,
+        port: svc.port,
+        enabled: wanted.has(svc.id),
+        overlay: svc.overlay,
+        ternField: svc.ternField,
+        vramHintBytes: SERVICE_VRAM_HINT[svc.id],
+        routes: routeTable(svc),
+      })),
+      proxy: { maxConcurrent: config.maxConcurrent, port: config.proxyPort },
       hostAvailable: hostAvailable(),
     });
   });

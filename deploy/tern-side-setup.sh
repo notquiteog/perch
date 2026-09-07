@@ -45,7 +45,8 @@ usage() {
 Options:
   --key "<ssh-ed25519 ...>"  the perch box's public key (required)
   --user <name>              account to create for the tunnel (default: perch)
-  --port <n>                 port the model endpoint lands on here (default: 11434)
+  --port <n>[,<n>...]        port(s) the endpoints land on here (default: 11434).
+                             One per service: chat, then dictation, then images.
   --bind <ip>                address to bind, if you would rather choose it
   --network <name>           Tern's podman network (default: detected)
   --host-tern                Tern runs on the host, not in a container
@@ -147,7 +148,15 @@ case "$PUBKEY" in
   ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*\ *) ;;
   *) die "that does not look like an SSH public key." ;;
 esac
-[[ "$PORT" =~ ^[0-9]{2,5}$ ]] || die "--port must be a port number."
+# One port per service the connection carries: chat, and optionally dictation
+# and images. Each has to be named in permitlisten, or the key may bind the
+# first and nothing else — which fails as a tunnel that connects and then
+# carries only some of what it should.
+IFS=',' read -ra PORT_LIST <<< "$PORT"
+for p in "${PORT_LIST[@]}"; do
+  [[ "$p" =~ ^[0-9]{2,5}$ ]] || die "--port takes port numbers, comma separated for more than one."
+done
+[ "${#PORT_LIST[@]}" -ge 1 ] || die "--port is required."
 [[ "$TUNNEL_USER" =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] || die "--user is not a valid account name."
 
 # ---------- work out where the tunnel should land ----------
@@ -261,7 +270,11 @@ install -d -m 700 -o "$TUNNEL_USER" -g "$TUNNEL_USER" "$HOME_DIR/.ssh"
 #                   ask for any other listener, so a stolen key cannot be used
 #                   to open a door somewhere else on this machine.
 #   command=        anything that does ask for a session gets nologin.
-AUTH_LINE="restrict,port-forwarding,permitlisten=\"$BIND:$PORT\",command=\"/usr/sbin/nologin\" $PUBKEY"
+PERMIT=""
+for p in "${PORT_LIST[@]}"; do
+  PERMIT="${PERMIT:+$PERMIT,}permitlisten=\"$BIND:$p\""
+done
+AUTH_LINE="restrict,port-forwarding,$PERMIT,command=\"/usr/sbin/nologin\" $PUBKEY"
 AUTH_FILE="$HOME_DIR/.ssh/authorized_keys"
 KEY_BODY="$(printf '%s' "$PUBKEY" | awk '{print $2}')"
 if [ -f "$AUTH_FILE" ] && grep -qF "$KEY_BODY" "$AUTH_FILE" 2>/dev/null; then
@@ -274,7 +287,7 @@ fi
 printf '%s\n' "$AUTH_LINE" >> "$AUTH_FILE"
 chown "$TUNNEL_USER:$TUNNEL_USER" "$AUTH_FILE"
 chmod 600 "$AUTH_FILE"
-ok "installed the key, restricted to listening on $BIND:$PORT"
+ok "installed the key, restricted to listening on $BIND:{${PORT_LIST[*]}}"
 
 # ---------- sshd ----------
 step "sshd"
