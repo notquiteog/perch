@@ -79,7 +79,7 @@ case "$cmd" in
     fi ;;
 
   pull-model)
-    [ $# -ge 1 ] || { bad "which model? e.g. ./bin/perch pull-model qwen2.5:7b"; exit 1; }
+    [ $# -ge 1 ] || { bad "which model? e.g. ./bin/perch pull-model qwen3.5:9b"; exit 1; }
     compose exec -T ollama ollama pull "$1" ;;
 
   models)
@@ -150,7 +150,7 @@ case "$cmd" in
     else bad "Ollama is not answering (./bin/perch logs ollama)"; fail=1; fi
 
     if compose exec -T ollama ollama list 2>/dev/null | tail -n +2 | grep -q .; then ok "at least one model is downloaded"
-    else warn "no models yet — download one in the console, or ./bin/perch pull-model qwen2.5:7b"; fi
+    else warn "no models yet — download one in the console, or ./bin/perch pull-model qwen3.5:9b"; fi
 
     if [ -f "${PERCH_STATE_DIR:-/var/lib/perch}/ssh/id_ed25519" ]; then ok "the tunnel key exists"
     else warn "no tunnel key yet — generate one in the console under Connect"; fi

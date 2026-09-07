@@ -87,7 +87,7 @@ that can start and stop everything.
 ./bin/perch doctor          # check the things that usually go wrong
 ./bin/perch logs ollama     # follow a container's logs
 ./bin/perch models          # what is installed, what is loaded
-./bin/perch pull-model qwen2.5:14b
+./bin/perch pull-model qwen3.5:9b
 ./bin/perch token "second laptop"
 ./bin/perch tunnel restart
 ./bin/perch boot on

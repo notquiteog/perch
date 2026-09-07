@@ -174,15 +174,16 @@ fi
 step "Sizing"
 if [ "$VRAM_MB" -gt 1024 ]; then USABLE_MB=$(( VRAM_MB * 9 / 10 )); BASIS="the GPU"
 else USABLE_MB=$(( RAM_KB / 1024 * 2 / 3 )); BASIS="system memory"; fi
+# Mirrors MODELS in server/src/system.ts — keep the two in step. The
+# thresholds are "needs to run well", which is the download plus room for the
+# context window, not the download alone.
 pick_model() {
   local mb=$1
-  if   [ "$mb" -ge 46000 ]; then echo "llama3.3:70b"
-  elif [ "$mb" -ge 23000 ]; then echo "qwen2.5:32b"
-  elif [ "$mb" -ge 11500 ]; then echo "qwen2.5:14b"
-  elif [ "$mb" -ge 8100  ]; then echo "gemma2:9b"
-  elif [ "$mb" -ge 6200  ]; then echo "qwen2.5:7b"
-  elif [ "$mb" -ge 3400  ]; then echo "llama3.2:3b"
-  else echo "qwen2.5:1.5b"; fi
+  if   [ "$mb" -ge 52500 ]; then echo "llama3.3:70b"
+  elif [ "$mb" -ge 22400 ]; then echo "qwen3.5:27b"
+  elif [ "$mb" -ge 9400  ]; then echo "qwen3.5:9b"
+  elif [ "$mb" -ge 5600  ]; then echo "qwen3.5:4b"
+  else echo "qwen3.5:2b"; fi
 }
 SUGGESTED_MODEL=$(pick_model "$USABLE_MB")
 note "${USABLE_MB} MB usable, judged from $BASIS"
