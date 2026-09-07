@@ -265,7 +265,19 @@ do_keygen() {
   local id="$1"
   valid_id "$id" || { echo "bad connection id"; return 2; }
   local dir="$STATE_DIR/ssh/$id" key="$STATE_DIR/ssh/$id/id_ed25519"
-  mkdir -p "$dir"; chmod 700 "$dir"
+  mkdir -p "$dir"
+  # 711, not 700, on both this directory and its parent.
+  #
+  # The private key is 600 and owned by the tunnel account, which is what keeps
+  # it secret. But the console — running in a container as a different uid —
+  # has to read the *public* key back to show it to you, and a 700 directory
+  # blocks that before file permissions are even consulted: the key generates
+  # fine and then cannot be read, which is a confusing way to fail.
+  #
+  # 711 lets another uid traverse to a path it already knows without being able
+  # to list the directory, and the private key stays unreadable to it.
+  chmod 711 "$STATE_DIR/ssh" 2>/dev/null || true
+  chmod 711 "$dir"
 
   # An install that predates per-connection keys has one at the old shared
   # path. Move it in rather than generating a second key the far side has

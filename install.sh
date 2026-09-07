@@ -231,7 +231,10 @@ fi
 # ---------- 6. the state directory ----------
 step "State"
 install -d -m 750 "$PERCH_STATE_DIR"
-install -d -m 700 "$PERCH_STATE_DIR/ssh"
+# 711: the tunnel account owns the private keys and only it can read them,
+# but the console container (a different uid) must be able to traverse here to
+# read a public key back. See do_keygen in deploy/perch-hostd.
+install -d -m 711 "$PERCH_STATE_DIR/ssh"
 install -d -m 755 "$PERCH_STATE_DIR/host"
 install -d -m 733 "$PERCH_STATE_DIR/host/requests"
 install -d -m 755 "$PERCH_STATE_DIR/host/results"

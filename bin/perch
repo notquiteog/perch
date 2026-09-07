@@ -184,7 +184,21 @@ case "$cmd" in
     else warn "no models yet — download one in the console, or ./bin/perch pull-model qwen3.5:9b"; fi
 
     keys=$(find "${PERCH_STATE_DIR:-/var/lib/perch}/ssh" -name id_ed25519 2>/dev/null | wc -l)
-    if [ "$keys" -gt 0 ]; then ok "$keys connection key(s) present"
+    if [ "$keys" -gt 0 ]; then
+      ok "$keys connection key(s) present"
+      # The console runs in a container as a different uid from the account
+      # that owns the keys. If it cannot traverse to a public key, adding a
+      # connection fails at the last step with nothing obviously wrong.
+      pub=$(find "${PERCH_STATE_DIR:-/var/lib/perch}/ssh" -name 'id_ed25519.pub' 2>/dev/null | head -1)
+      if [ -n "$pub" ]; then
+        if compose exec -T perch sh -c "cat '$pub' >/dev/null 2>&1"; then ok "the console can read the public keys"
+        else bad "the console cannot read the public keys — adding a connection will fail"
+             note "sudo chmod 711 ${PERCH_STATE_DIR:-/var/lib/perch}/ssh ${PERCH_STATE_DIR:-/var/lib/perch}/ssh/*"
+             fail=1; fi
+        if compose exec -T perch sh -c "cat '${pub%.pub}' >/dev/null 2>&1"; then
+          bad "the console can read a PRIVATE key — it should not be able to"; fail=1
+        else ok "private keys are not readable by the console"; fi
+      fi
     else warn "no connection keys yet — add a connection in the console under Connect"; fi
 
     if systemctl is-active perch-hostd.service >/dev/null 2>&1; then ok "the host helper is running"
@@ -217,8 +231,16 @@ case "$cmd" in
     if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
       if compose exec -T ollama test -e /dev/nvidia0 2>/dev/null; then
         ok "Ollama can reach the GPU"
-        if compose logs ollama 2>/dev/null | grep -q 'library=CUDA'; then ok "Ollama loaded the CUDA runtime"
-        else warn "the device is there but Ollama has not reported a CUDA device; see ./bin/perch logs ollama"; fi
+        # Where a model is loaded, ollama itself says whether it is on the
+        # card, which beats grepping the log: the CUDA line is printed once at
+        # startup, so finding it means reading the whole log — slow enough on a
+        # busy install to make doctor look hung.
+        proc=$(compose exec -T ollama ollama ps 2>/dev/null | awk 'NR==2 {print $4, $5}')
+        case "$proc" in
+          *GPU*) ok "the loaded model is on the GPU ($proc)" ;;
+          *CPU*) bad "a model is loaded but running on the CPU ($proc)"; fail=1 ;;
+          *)     note "no model loaded, so nothing to report on placement" ;;
+        esac
       else
         bad "this machine has an NVIDIA GPU but the container cannot see it — the model is running on the CPU"
         note "re-run sudo ./install.sh: it will pass the devices through, or use the container toolkit if you have it"

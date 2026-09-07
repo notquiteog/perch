@@ -172,7 +172,19 @@ export async function generateKey(id: string): Promise<string> {
   if (!result.ok) throw badRequest(result.output || 'could not generate a key');
   const conn = getConnection(id);
   const key = publicKeyOf(conn);
-  if (!key) throw badRequest('the key was generated but could not be read back');
+  if (!key) {
+    // Almost always a permissions problem rather than a missing file: the
+    // console runs in a container as a different uid from the account that
+    // owns the keys, and a directory it cannot traverse blocks the read
+    // before file permissions are consulted. Say so, because "could not be
+    // read back" on its own leaves nowhere to go.
+    throw badRequest(
+      `The key was generated but ${conn.keyPath}.pub could not be read back. `
+      + 'This is usually the key directory being unreadable to the console: '
+      + '`sudo chmod 711 /var/lib/perch/ssh /var/lib/perch/ssh/*` and then '
+      + '`sudo systemctl restart perch-hostd`.',
+    );
+  }
   updateState((s) => {
     const c = s.connections.find((x) => x.id === id);
     if (c) c.publicKey = key;
