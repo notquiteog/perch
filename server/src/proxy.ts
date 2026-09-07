@@ -72,12 +72,6 @@ export function createProxyServer(service: ServiceDef): http.Server {
       return;
     }
 
-    if (isBlocked(ip)) {
-      send(res, 429, { error: 'too many failed authentications from this address' }, { 'Retry-After': '900' });
-      finish(429, 'blocked');
-      return;
-    }
-
     const route: Route | undefined = service.routes.find((r) => r.method === method && r.path === path);
     if (!route) {
       // Same answer whether the path is unknown to Ollama or simply not
@@ -88,9 +82,29 @@ export function createProxyServer(service: ServiceDef): http.Server {
       return;
     }
 
+    // The token is checked before the block is consulted, and this order
+    // matters more than it looks.
+    //
+    // Everything arrives here through the tunnel, so every request has the
+    // same peer address — loopback. Blocking by address is therefore blocking
+    // everything: one client with an empty API key field trips the counter and
+    // locks out the correctly configured ones too, and, worse, refuses the
+    // right token afterwards. Somebody who fixes their settings then waits
+    // fifteen minutes for a block they can no longer trigger.
+    //
+    // A valid token is proof this is not a guess, so it is honoured whatever
+    // the counter says and clears it. A guesser never has one, so they still
+    // collect failures and are still refused. The cost of checking first is a
+    // hash and a constant-time compare.
     const need: Scope = route.manage ? 'manage' : 'use';
     const auth = authenticate(req.headers.authorization, need);
+
     if (!auth.ok) {
+      if (isBlocked(ip)) {
+        send(res, 429, { error: 'too many failed authentications from this address' }, { 'Retry-After': '900' });
+        finish(429, 'blocked');
+        return;
+      }
       if (auth.reason === 'scope') {
         // A real token that is not allowed this operation: worth saying so
         // plainly, because the fix is a scope, not a new token.
@@ -100,10 +114,15 @@ export function createProxyServer(service: ServiceDef): http.Server {
         return;
       }
       noteAuthFailure(ip);
-      send(res, 401, { error: 'a valid bearer token is required' }, { 'WWW-Authenticate': 'Bearer realm="perch"' });
+      send(res, 401, {
+        error: auth.reason === 'missing'
+          ? 'no API key was sent. In Tern this is Admin → AI model → API key; perch issues one under Settings → API tokens.'
+          : 'that API key is not valid here. Make a new one under Settings → API tokens in perch.',
+      }, { 'WWW-Authenticate': 'Bearer realm="perch"' });
       finish(401, auth.reason);
       return;
     }
+
     tokenName = auth.token!.name;
     noteAuthSuccess(ip);
 

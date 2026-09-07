@@ -138,10 +138,37 @@ test('an address that keeps guessing is refused outright', async () => {
   }
   const blocked = await call('/api/tags', { headers: { Authorization: 'Bearer perch_wrong' } });
   assert.equal(blocked.status, 429);
-  // Even a good token is refused while the block stands: the block is on the
-  // address, not on the credential.
+  resetAuthFailures();
+});
+
+test('a valid token is honoured even while that address is blocked', async () => {
+  // Everything arrives through the tunnel from one address, so a block by
+  // address blocks everyone. One client with an empty API key field must not
+  // lock out a correctly configured one — nor refuse the right token to
+  // somebody who has just fixed their settings.
+  resetAuthFailures();
+  for (let i = 0; i < 4; i += 1) {
+    await call('/api/tags', { headers: { Authorization: 'Bearer perch_wrong' } });
+  }
+  assert.equal((await call('/api/tags', { headers: { Authorization: 'Bearer perch_wrong' } })).status, 429,
+    'the guesser is still blocked');
+
   const good = await call('/api/tags', { headers: { Authorization: `Bearer ${useToken}` } });
-  assert.equal(good.status, 429);
+  assert.equal(good.status, 200, 'a valid token must get through the block');
+
+  // And succeeding clears the counter, so the next mistake starts from zero.
+  assert.equal((await call('/api/tags', { headers: { Authorization: 'Bearer perch_wrong' } })).status, 401,
+    'after a success the block should be cleared, so this is a plain 401');
+  resetAuthFailures();
+});
+
+test('a missing key says so, and says where to get one', async () => {
+  resetAuthFailures();
+  const res = await call('/api/tags');
+  assert.equal(res.status, 401);
+  const body = await res.json() as { error: string };
+  assert.match(body.error, /no API key was sent/);
+  assert.match(body.error, /Settings . API tokens/);
   resetAuthFailures();
 });
 
