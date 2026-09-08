@@ -20,7 +20,8 @@ import { sizing, MODELS, EMBED_MODELS, UNCENSORED_MODELS, human } from './system
 import { mediaOverview, mediaModel, MODEL_VOLUMES } from './media.js';
 import { containerDef, containerForTuningKey, containerSizes, floorFor, memBytes, tuningReport, validCpus, validMem } from './containers.js';
 import { proxyInFlight, routeTable } from './proxy.js';
-import { SERVICES, SERVICE_VRAM_HINT, isServiceId } from './services.js';
+import { SERVICES, SERVICE_VRAM_HINT, isServiceId, type ServiceId } from './services.js';
+import { parseProxy } from './upstream.js';
 import { throughput } from './metrics.js';
 import { recent, summary } from './activity.js';
 import * as tunnel from './tunnel.js';
@@ -740,6 +741,15 @@ export function buildApi(): Router {
         overlay: svc.overlay,
         ternField: svc.ternField,
         speaks: svc.speaks,
+        // The same as `speaks`, as data: the console renders one badge per
+        // shape, and a client asking what an address is can be told without
+        // parsing English.
+        api: svc.api,
+        // Where this service's own upstream is, and how it is reached. Both
+        // are per service because the four upstreams are four different
+        // servers and are routinely reached four different ways.
+        upstream: svc.upstream,
+        proxyEnv: svc.proxyEnv,
         vramHintBytes: SERVICE_VRAM_HINT[svc.id],
         routes: routeTable(svc),
       })),
@@ -750,14 +760,32 @@ export function buildApi(): Router {
 
   r.put('/api/settings', async (ctx) => {
     requireConsole(ctx);
-    const body = await readJson<{ allowManage?: boolean; keepAlive?: string; unloadWhenIdle?: boolean }>(ctx.req);
+    const body = await readJson<{
+      allowManage?: boolean; keepAlive?: string; unloadWhenIdle?: boolean;
+      proxies?: Partial<Record<ServiceId, string>>;
+    }>(ctx.req);
     if (body.keepAlive !== undefined && !/^-?\d+[smh]?$/.test(body.keepAlive)) {
       throw badRequest('Keep loaded wants a duration such as 30s, 10m or 1h — or -1 to never unload.');
+    }
+    // Every proxy is parsed before any of them is stored. A field that will
+    // not parse is refused here rather than at the first request through it:
+    // the alternative is a service that saves cleanly and then stops answering,
+    // with the reason in a log nobody is reading yet.
+    if (body.proxies) {
+      for (const [id, value] of Object.entries(body.proxies)) {
+        if (!SERVICES.some((svc) => svc.id === id)) throw badRequest(`no such service: ${id}`);
+        try { parseProxy(value); } catch (e) {
+          throw badRequest(`${id}: ${(e as Error).message}`);
+        }
+      }
     }
     const next = updateState((s) => {
       if (body.allowManage !== undefined) s.settings.allowManage = Boolean(body.allowManage);
       if (body.keepAlive !== undefined) s.settings.keepAlive = body.keepAlive;
       if (body.unloadWhenIdle !== undefined) s.settings.unloadWhenIdle = Boolean(body.unloadWhenIdle);
+      for (const [id, value] of Object.entries(body.proxies ?? {})) {
+        s.settings.proxies[id as ServiceId] = String(value ?? '').trim();
+      }
     }).settings;
     sendJson(ctx.res, 200, { settings: next });
   });

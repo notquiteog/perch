@@ -166,10 +166,10 @@ test('a chat-only connection forwards one port', async () => {
 test('each service lands on its own port, chat on the one it was given', async () => {
   const c = await t.createConnection({
     name: 'Everything', host: 'everything.example.com', remotePort: 11500,
-    services: ['chat', 'voice', 'image'],
+    services: ['chat', 'voice', 'video'],
   });
   assert.deepEqual(t.forwardsFor(c).map((x) => [x.id, x.remotePort]),
-    [['chat', 11500], ['voice', 8080], ['image', 7860]]);
+    [['chat', 11500], ['voice', 8080], ['video', 8188]]);
   // Both ends of a mirrored service agree, which is the point of the change.
   for (const f of t.forwardsFor(c)) {
     if (f.id !== 'chat') assert.equal(f.remotePort, f.localPort, `${f.id} must mirror`);
@@ -272,7 +272,7 @@ test('every address says what it speaks', () => {
 test('the setup command permitlists every forwarded port', async () => {
   const c = t.listConnections().find((x) => x.name === 'Everything')!;
   const cmd = t.setupCommand({ ...c, publicKey: 'ssh-ed25519 AAAA test' });
-  assert.match(cmd!, /--port 11500,8080,7860/);
+  assert.match(cmd!, /--port 11500,8080,8188/);
 });
 
 test('the ssh command has one -R per service', () => {
@@ -285,10 +285,10 @@ test('the ssh command has one -R per service', () => {
 test('Tern gets a URL per service, and knows where each one goes', () => {
   const c = t.listConnections().find((x) => x.name === 'Everything')!;
   const urls = t.ternUrls({ ...c, remoteBind: '10.89.0.1' });
-  assert.deepEqual(urls.map((u) => u.id), ['chat', 'voice', 'image']);
+  assert.deepEqual(urls.map((u) => u.id), ['chat', 'voice', 'video']);
   assert.match(urls[0]!.url, /host\.containers\.internal:11500$/);
   assert.match(urls[1]!.ternField!, /Transcriber/);
-  assert.equal(urls[2]!.ternField, null, 'Tern has no image setting to point at');
+  assert.equal(urls[2]!.ternField, null, 'Tern has no setting for images or video to point at');
 });
 
 test.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));

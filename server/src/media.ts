@@ -10,8 +10,8 @@
 //
 //   - the exact files, their URLs and their real sizes, checked against the
 //     registry rather than remembered;
-//   - which container runs it, because a Stable Diffusion checkpoint is
-//     useless to ComfyUI's directory layout and vice versa;
+//   - which container runs it, because an image checkpoint and a Kokoro voice
+//     are not interchangeable and do not live in the same volume;
 //   - what it wants on the card while it works, which is the number that
 //     decides whether it fits beside a language model.
 //
@@ -76,7 +76,6 @@ export interface ModelStore {
  * fetched before its first start survive it.
  */
 export const MODEL_VOLUMES: Partial<Record<ServiceId, ModelStore>> = {
-  image: { volume: 'perch-sd-models', subdir: '' },
   video: { volume: 'perch-comfy', subdir: 'ComfyUI/models' },
 };
 
@@ -91,60 +90,66 @@ const hf = (repo: string, path: string): string => `https://huggingface.co/${rep
 // Ordered smallest first within each family, because that is the order
 // somebody with one card reads them in.
 export const MEDIA_MODELS: MediaModel[] = [
-  // ---------- images: Stable Diffusion, in the A1111 container ----------
+  // ---------- images: every one of these is a ComfyUI checkpoint ----------
+  //
+  // The SD 1.5 and SDXL entries below used to run in a Stable Diffusion web UI
+  // container of their own, which is why they are still described in that
+  // family's terms. ComfyUI loads the same checkpoint files unchanged — the
+  // only thing that moved when that container went away is the directory they
+  // belong in, `checkpoints/` rather than `Stable-diffusion/`.
   {
     id: 'dreamshaper-8',
     name: 'DreamShaper 8',
     family: 'image',
-    service: 'image',
+    service: 'video',
     params: 'SD 1.5',
     sizeBytes: 2.13e9,
     needsBytes: 4e9,
-    files: [{ url: hf('Lykon/DreamShaper', 'DreamShaper_8_pruned.safetensors'), dest: 'Stable-diffusion/DreamShaper_8_pruned.safetensors', bytes: 2.13e9 }],
+    files: [{ url: hf('Lykon/DreamShaper', 'DreamShaper_8_pruned.safetensors'), dest: 'checkpoints/DreamShaper_8_pruned.safetensors', bytes: 2.13e9 }],
     note: 'The small one that still looks good. An SD 1.5 fine-tune, so it generates in seconds on a modest card and leaves most of it free — the sensible first checkpoint on a box that is mainly doing something else.',
   },
   {
     id: 'sd15',
     name: 'Stable Diffusion 1.5',
     family: 'image',
-    service: 'image',
+    service: 'video',
     params: 'SD 1.5',
     sizeBytes: 4.27e9,
     needsBytes: 4e9,
-    files: [{ url: hf('stable-diffusion-v1-5/stable-diffusion-v1-5', 'v1-5-pruned-emaonly.safetensors'), dest: 'Stable-diffusion/v1-5-pruned-emaonly.safetensors', bytes: 4.27e9 }],
+    files: [{ url: hf('stable-diffusion-v1-5/stable-diffusion-v1-5', 'v1-5-pruned-emaonly.safetensors'), dest: 'checkpoints/v1-5-pruned-emaonly.safetensors', bytes: 4.27e9 }],
     note: 'The base model everything else in this family was trained from. Worth having as a reference; a fine-tune of it will almost always look better.',
   },
   {
     id: 'sdxl-turbo',
     name: 'SDXL Turbo',
     family: 'image',
-    service: 'image',
+    service: 'video',
     params: 'SDXL',
     sizeBytes: 6.94e9,
     needsBytes: 10e9,
-    files: [{ url: hf('stabilityai/sdxl-turbo', 'sd_xl_turbo_1.0_fp16.safetensors'), dest: 'Stable-diffusion/sd_xl_turbo_1.0_fp16.safetensors', bytes: 6.94e9 }],
+    files: [{ url: hf('stabilityai/sdxl-turbo', 'sd_xl_turbo_1.0_fp16.safetensors'), dest: 'checkpoints/sd_xl_turbo_1.0_fp16.safetensors', bytes: 6.94e9 }],
     note: 'SDXL quality in one to four steps instead of thirty. The fastest thing here by a wide margin, at some cost in fine detail and prompt following.',
   },
   {
     id: 'sdxl-base',
     name: 'SDXL 1.0 base',
     family: 'image',
-    service: 'image',
+    service: 'video',
     params: 'SDXL',
     sizeBytes: 6.94e9,
     needsBytes: 10e9,
-    files: [{ url: hf('stabilityai/stable-diffusion-xl-base-1.0', 'sd_xl_base_1.0.safetensors'), dest: 'Stable-diffusion/sd_xl_base_1.0.safetensors', bytes: 6.94e9 }],
+    files: [{ url: hf('stabilityai/stable-diffusion-xl-base-1.0', 'sd_xl_base_1.0.safetensors'), dest: 'checkpoints/sd_xl_base_1.0.safetensors', bytes: 6.94e9 }],
     note: 'Native 1024×1024 and a real step up in composition. On a card also holding a language model this is where the two stop fitting together — see the sizes on the Status page.',
   },
   {
     id: 'juggernaut-xl-v9',
     name: 'Juggernaut XL v9',
     family: 'image',
-    service: 'image',
+    service: 'video',
     params: 'SDXL',
     sizeBytes: 7.11e9,
     needsBytes: 10e9,
-    files: [{ url: hf('RunDiffusion/Juggernaut-XL-v9', 'Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors'), dest: 'Stable-diffusion/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors', bytes: 7.11e9 }],
+    files: [{ url: hf('RunDiffusion/Juggernaut-XL-v9', 'Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors'), dest: 'checkpoints/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors', bytes: 7.11e9 }],
     note: 'An SDXL fine-tune aimed at photographic work. Better at faces and light than the base model, and the same size on the card.',
   },
   {
@@ -156,7 +161,7 @@ export const MEDIA_MODELS: MediaModel[] = [
     sizeBytes: 17.24e9,
     needsBytes: 18e9,
     files: [{ url: hf('Comfy-Org/flux1-schnell', 'flux1-schnell-fp8.safetensors'), dest: 'checkpoints/flux1-schnell-fp8.safetensors', bytes: 17.24e9 }],
-    note: 'The current open image model, and much better at text in pictures than anything above. It runs in the video service’s container rather than the image one — Stable Diffusion’s web UI cannot load it, ComfyUI can. Needs a 24 GB card to be comfortable.',
+    note: 'The current open image model, and much better at text in pictures than anything above. Needs a 24 GB card to be comfortable.',
   },
 
   // ---------- video: ComfyUI ----------
@@ -239,7 +244,7 @@ export const MEDIA_MODELS: MediaModel[] = [
     sizeBytes: 7.7e9,
     needsBytes: 10e9,
     files: [{ url: hf('Comfy-Org/ACE-Step_ComfyUI_repackaged', 'all_in_one/ace_step_v1_3.5b.safetensors'), dest: 'checkpoints/ace_step_v1_3.5b.safetensors', bytes: 7.7e9 }],
-    note: 'Music from a prompt — a minute of song in a few seconds on a good card. Like FLUX it is a diffusion graph, so it runs in the video service’s container rather than needing one of its own.',
+    note: 'Music from a prompt — a minute of song in a few seconds on a good card.',
   },
 ];
 
@@ -308,20 +313,13 @@ function looksLikeStarting(message: string): boolean {
   return /timed? ?out|abort/i.test(message);
 }
 
-/** Stable Diffusion lists its checkpoints; that is the whole probe. */
-async function imageInstalled(): Promise<string[]> {
-  const models = await jsonOrNull<Array<{ title?: string; model_name?: string; filename?: string }>>(`${config.sdUrl}/sdapi/v1/sd-models`);
-  if (!models) return [];
-  return models.map((m) => (m.filename ?? m.title ?? m.model_name ?? '').split('/').pop() ?? '').filter(Boolean);
-}
-
 /**
  * ComfyUI keeps weights in one directory per kind, and a model here may put
  * files in three of them, so every directory a catalogue entry mentions is
  * listed. `/models/<kind>` is the cheap call for this; `/object_info` would
  * also answer it and is megabytes of JSON.
  */
-async function videoInstalled(): Promise<string[]> {
+async function comfyInstalled(): Promise<string[]> {
   const kinds = new Set<string>();
   for (const m of MEDIA_MODELS) {
     if (m.service !== 'video') continue;
@@ -342,18 +340,16 @@ async function audioInstalled(): Promise<string[]> {
 }
 
 const PROBE: Record<string, { path: string; installed: () => Promise<string[]> }> = {
-  image: { path: '/internal/ping', installed: imageInstalled },
-  video: { path: '/system_stats', installed: videoInstalled },
+  video: { path: '/system_stats', installed: comfyInstalled },
   audio: { path: '/health', installed: audioInstalled },
 };
 
 const UPSTREAM: Record<string, string> = {
-  image: config.sdUrl,
   video: config.comfyUrl,
   audio: config.ttsUrl,
 };
 
-export async function mediaStatus(id: 'image' | 'video' | 'audio'): Promise<MediaServiceStatus> {
+export async function mediaStatus(id: 'video' | 'audio'): Promise<MediaServiceStatus> {
   const url = UPSTREAM[id]!;
   const base = { id: id as ServiceId, enabled: enabled(id), url, installed: [] as string[], at: new Date().toISOString() };
   if (!base.enabled) return { ...base, ok: false, starting: false, error: `${id} is not switched on for this machine` };
@@ -381,11 +377,11 @@ export interface MediaOverview {
 
 /**
  * The whole picture for the Models page: the catalogue, and what each backend
- * says it has. The three probes run together — one of them being slow should
- * not hold up the other two.
+ * says it has. Both probes run together — one of them being slow should not
+ * hold up the other.
  */
 export async function mediaOverview(): Promise<MediaOverview> {
-  const services = await Promise.all((['image', 'video', 'audio'] as const).map((id) => mediaStatus(id)));
+  const services = await Promise.all((['video', 'audio'] as const).map((id) => mediaStatus(id)));
   return { models: MEDIA_MODELS, services, at: new Date().toISOString() };
 }
 

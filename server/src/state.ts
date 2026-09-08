@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
 import { logger } from './log.js';
+import type { ServiceId } from './services.js';
 
 const log = logger('state');
 
@@ -87,6 +88,21 @@ export interface Settings {
   keepAlive: string;
   /** Drop the model from memory as soon as nothing is generating. */
   unloadWhenIdle: boolean;
+  /**
+   * How each service reaches its own upstream: a proxy URL, or empty for a
+   * direct connection.
+   *
+   * Per service rather than one setting for the box, because the four
+   * upstreams are four different servers and are routinely reached four
+   * different ways. `socks5h://127.0.0.1:9150` routes that one service through
+   * Tor; see upstream.ts for why the field holds a URL rather than a switch.
+   *
+   * Stored here rather than only in the environment so an operator can change
+   * a route from the console without editing a file and recreating a
+   * container — which matters most for exactly the change this enables,
+   * because a wrong proxy is a service that stops answering.
+   */
+  proxies: Record<ServiceId, string>;
 }
 
 export interface State {
@@ -106,6 +122,12 @@ const DEFAULTS: State = {
     allowManage: config.allowManage,
     keepAlive: '10m',
     unloadWhenIdle: false,
+    proxies: {
+      chat: config.chatProxy,
+      voice: config.voiceProxy,
+      video: config.videoProxy,
+      audio: config.audioProxy,
+    },
   },
 };
 
@@ -153,7 +175,15 @@ function merge(loaded: unknown): State {
     tokens: Array.isArray(l.tokens) ? l.tokens : [],
     console: { ...DEFAULTS.console, ...(l.console ?? {}) },
     connections,
-    settings: { ...DEFAULTS.settings, ...(l.settings ?? {}) },
+    settings: {
+      ...DEFAULTS.settings,
+      ...(l.settings ?? {}),
+      // Merged one level deeper than the rest: a state file written before
+      // this setting existed has no `proxies` at all, and a file written by an
+      // older perch that knew three services would otherwise drop the fourth
+      // to `undefined` rather than to its default.
+      proxies: { ...DEFAULTS.settings.proxies, ...(l.settings?.proxies ?? {}) },
+    },
   };
 }
 

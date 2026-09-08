@@ -406,6 +406,8 @@ export async function handleMessages(
   res: http.ServerResponse,
   upstreamUrl: string,
   started: number,
+  // How to reach the upstream, when that is not a direct connection.
+  agent?: http.Agent,
 ): Promise<MessagesResult> {
   let body: Block;
   try {
@@ -451,6 +453,7 @@ export async function handleMessages(
       method: 'POST',
       path: upstream.pathname,
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      ...(agent ? { agent } : {}),
     }, (upstreamRes) => {
       const status = upstreamRes.statusCode ?? 502;
       if (status >= 400) {

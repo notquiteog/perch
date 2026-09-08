@@ -42,8 +42,7 @@ export function forwardsFor(c: Connection): Array<{ id: string; localPort: numbe
   const order: Array<{ id: string; port: number; label: string }> = [
     { id: 'chat', port: config.hostChatPort, label: 'Chat' },
     { id: 'voice', port: config.hostVoicePort, label: 'Dictation' },
-    { id: 'image', port: config.hostImagePort, label: 'Images' },
-    { id: 'video', port: config.hostVideoPort, label: 'Video' },
+    { id: 'video', port: config.hostVideoPort, label: 'Video and images' },
     { id: 'audio', port: config.hostAudioPort, label: 'Audio' },
   ];
   return order

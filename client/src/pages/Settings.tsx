@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, human, relative, type ServiceInfo, type TokenRecord } from '../api';
+import { api, human, relative, type PerchSettings, type ServiceInfo, type TokenRecord } from '../api';
 import { Card, CodeBlock, Empty, Notice, Spinner, Tag, Toggle } from '../components/ui';
 
 export default function Settings() {
   const [tokens, setTokens] = useState<TokenRecord[]>([]);
-  const [settings, setSettings] = useState<{ allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean } | null>(null);
+  const [settings, setSettings] = useState<PerchSettings | null>(null);
+  // Edited per service and saved on blur, so a half-typed proxy URL is never
+  // sent — the server refuses a malformed one, and refusing on every keystroke
+  // would be a form that argues while you type.
+  const [proxyDraft, setProxyDraft] = useState<Record<string, string>>({});
   const [services, setServices] = useState<ServiceInfo[]>([]);
   const [proxyInfo, setProxyInfo] = useState<{ maxConcurrent: number; port: number } | null>(null);
   const [passwordSet, setPasswordSet] = useState(false);
@@ -188,6 +192,36 @@ export default function Settings() {
               <span className="hint mono">~{human(svc.vramHintBytes)} on the card</span>
             </div>
             <p className="sub" style={{ margin: '6px 0 0' }}>{svc.blurb}</p>
+            <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+              {svc.api.map((shape) => <Tag key={shape}>{shape}</Tag>)}
+            </div>
+            {/* Where this service's upstream is, and how it is reached. Both
+                are per service because the four upstreams are four different
+                servers: a chat model on a rented box across the internet and a
+                whisper container one bridge away are not the same journey and
+                should not share one decision. */}
+            <label style={{ display: 'block', marginTop: 8 }}>
+              <span className="hint">
+                Upstream <span className="mono">{svc.upstream}</span> — proxy
+              </span>
+              <input
+                className="mono"
+                style={{ width: '100%', marginTop: 4 }}
+                placeholder="direct — or socks5h://127.0.0.1:9150 for Tor"
+                value={proxyDraft[svc.id] ?? settings?.proxies?.[svc.id] ?? ''}
+                onChange={(e) => setProxyDraft({ ...proxyDraft, [svc.id]: e.target.value })}
+                onBlur={() => {
+                  const value = proxyDraft[svc.id];
+                  if (value === undefined || value === (settings?.proxies?.[svc.id] ?? '')) return;
+                  void run(`proxy-${svc.id}`, () => api.saveSettings({ proxies: { [svc.id]: value } }));
+                }}
+              />
+              <span className="hint">
+                {(settings?.proxies?.[svc.id] ?? '')
+                  ? 'This service reaches its upstream through that proxy; the others are unaffected.'
+                  : `Empty is a direct connection. Preset with ${svc.proxyEnv} in .env.`}
+              </span>
+            </label>
             {svc.ternField && (
               <p className="hint" style={{ margin: '4px 0 0' }}>
                 Goes in Tern under <span className="mono">{svc.ternField}</span>.

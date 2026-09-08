@@ -362,7 +362,7 @@ run_action() {
     containers.restart)
       case "$arg" in
         ''|all)      compose restart ;;
-        perch|ollama|whisper|sd|comfy|kokoro) compose restart "$arg" ;;
+        perch|ollama|whisper|comfy|kokoro) compose restart "$arg" ;;
         *)           echo "unknown service: $arg"; return 2 ;;
       esac ;;
     # Both a resource limit and a tuning value are fixed when a container is
@@ -371,7 +371,7 @@ run_action() {
     # setting to fail.
     containers.recreate)
       case "$arg" in
-        perch|ollama|whisper|sd|comfy|kokoro) compose up -d --force-recreate "$arg" ;;
+        perch|ollama|whisper|comfy|kokoro) compose up -d --force-recreate "$arg" ;;
         ''|all)      compose up -d --force-recreate ;;
         *)           echo "unknown service: $arg"; return 2 ;;
       esac ;;
@@ -398,7 +398,7 @@ run_action() {
         # whisper's log is where a first start's model download is visible;
         # nothing else reports that progress at all. ComfyUI's is where a
         # workflow that failed for want of a model file says so.
-        perch|ollama|whisper|sd|comfy|kokoro) compose logs --tail=200 "$arg" ;;
+        perch|ollama|whisper|comfy|kokoro) compose logs --tail=200 "$arg" ;;
         *)               echo "unknown service: $arg"; return 2 ;;
       esac ;;
     env.set)             do_env_set "$arg" ;;
@@ -680,9 +680,9 @@ do_env_set() {
     # 512m, 8g, or 0 for no limit — and a CPU limit in cores, which may have a
     # fraction. Both go straight into a `podman create` argument, so the shape
     # is checked here as well as in the console.
-    PERCH_MEM_LIMIT|OLLAMA_MEM_LIMIT|WHISPER_MEM_LIMIT|SD_MEM_LIMIT|COMFY_MEM_LIMIT|KOKORO_MEM_LIMIT)
+    PERCH_MEM_LIMIT|OLLAMA_MEM_LIMIT|WHISPER_MEM_LIMIT|COMFY_MEM_LIMIT|KOKORO_MEM_LIMIT)
       [[ $value =~ ^[0-9]{1,6}[kmgKMG]?$ ]] || { echo "bad value for $key"; return 2; } ;;
-    PERCH_CPUS|OLLAMA_CPUS|WHISPER_CPUS|SD_CPUS|COMFY_CPUS|KOKORO_CPUS)
+    PERCH_CPUS|OLLAMA_CPUS|WHISPER_CPUS|COMFY_CPUS|KOKORO_CPUS)
       [[ $value =~ ^[0-9]{1,3}(\.[0-9]{1,2})?$ ]] || { echo "bad value for $key"; return 2; } ;;
     # The speech model. A literal list rather than a pattern: the value
     # becomes part of a filename inside the container's start command
@@ -795,8 +795,8 @@ do_env_get() {
   case "$key" in
     OLLAMA_NUM_PARALLEL|OLLAMA_MAX_LOADED_MODELS|OLLAMA_MAX_QUEUE|OLLAMA_KV_CACHE_TYPE) ;;
     OLLAMA_FLASH_ATTENTION|OLLAMA_KEEP_ALIVE|PERCH_MAX_CONCURRENT|WHISPER_MODEL) ;;
-    PERCH_MEM_LIMIT|OLLAMA_MEM_LIMIT|WHISPER_MEM_LIMIT|SD_MEM_LIMIT|COMFY_MEM_LIMIT|KOKORO_MEM_LIMIT) ;;
-    PERCH_CPUS|OLLAMA_CPUS|WHISPER_CPUS|SD_CPUS|COMFY_CPUS|KOKORO_CPUS) ;;
+    PERCH_MEM_LIMIT|OLLAMA_MEM_LIMIT|WHISPER_MEM_LIMIT|COMFY_MEM_LIMIT|KOKORO_MEM_LIMIT) ;;
+    PERCH_CPUS|OLLAMA_CPUS|WHISPER_CPUS|COMFY_CPUS|KOKORO_CPUS) ;;
     *) echo "refused: $key is not a readable key"; return 2 ;;
   esac
   [ -f "$PERCH_DIR/.env" ] || { echo "no .env at $PERCH_DIR"; return 1; }

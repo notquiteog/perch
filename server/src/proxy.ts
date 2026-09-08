@@ -8,14 +8,18 @@
 // instead of arriving in one lump at the end — and it means perch never has
 // the whole of anyone's email in memory, let alone on disk.
 //
-// There is exactly one exception, and it is marked `translated` in the route
-// table so it cannot be a thing somebody has to remember: Anthropic's
-// `/v1/messages` is a shape Ollama does not serve, so `anthropic.ts` rewrites
-// it. Everything before the dispatch below — the token, the scope, the block
-// list, the size ceiling, the concurrency backstop, the activity ring — runs
-// for a translated route exactly as it does for a piped one. What differs is
-// only what happens after, and `anthropic.ts` opens by saying precisely which
-// part of the promise above it cannot keep.
+// The exceptions are marked `translated` in the route table, naming the
+// handler, so they cannot be a thing somebody has to remember. There are two
+// backends being translated for: Anthropic's `/v1/messages` is a shape Ollama
+// does not serve, so `anthropic.ts` rewrites it, and OpenAI's
+// `/v1/images/generations` is a shape ComfyUI does not serve, so `images.ts`
+// turns it into a workflow graph and back.
+//
+// Everything before the dispatch below — the token, the scope, the block list,
+// the size ceiling, the concurrency backstop, the activity ring — runs for a
+// translated route exactly as it does for a piped one. What differs is only
+// what happens after, and both translators open by saying precisely which part
+// of the promise above they cannot keep.
 import http from 'node:http';
 import { Readable } from 'node:stream';
 import { config } from './config.js';
@@ -25,6 +29,8 @@ import { loadState } from './state.js';
 import { record } from './activity.js';
 import { recordGeneration, recordTokens } from './metrics.js';
 import { handleCountTokens, handleMessages } from './anthropic.js';
+import { upstreamFor } from './upstream.js';
+import { handleImageModels, handleImages } from './images.js';
 import { logger } from './log.js';
 
 const log = logger('proxy');
@@ -56,11 +62,32 @@ function send(res: http.ServerResponse, status: number, body: unknown, extra: ht
 }
 
 export function createProxyServer(service: ServiceDef): http.Server {
-  const upstream = new URL(service.upstream);
   const log = logger(`proxy:${service.id}`);
 
   const server = http.createServer((req, res) => {
     const started = Date.now();
+    // Resolved per request rather than once at startup, so changing a
+    // service's proxy in the console takes effect on the next call instead of
+    // on the next restart — which matters most for exactly this setting,
+    // because a wrong proxy is a service that has stopped answering.
+    let upstream: URL;
+    let agent: http.Agent | undefined;
+    try {
+      const resolved = upstreamFor(service.upstream, loadState().settings.proxies?.[service.id]);
+      upstream = resolved.url;
+      agent = resolved.agent;
+    } catch (e) {
+      // A proxy that will not parse is refused rather than ignored. Falling
+      // back to a direct connection would send the traffic somewhere the
+      // operator specifically said not to, and say nothing about it.
+      send(res, 502, { error: `this service's proxy setting is not usable: ${(e as Error).message}` });
+      record({
+        at: new Date().toISOString(), service: service.id, method: (req.method || 'GET').toUpperCase(),
+        path: (req.url || '/').split('?')[0] || '/', status: 502, ms: 0, bytes: 0,
+        token: null, ip: clientIp(req), note: 'bad proxy setting',
+      });
+      return;
+    }
     const ip = clientIp(req);
     const path = (req.url || '/').split('?')[0] || '/';
     const method = (req.method || 'GET').toUpperCase();
@@ -159,9 +186,9 @@ export function createProxyServer(service: ServiceDef): http.Server {
     // request rather than per chunk.
     noteTokenUse(auth.token!.id, ip);
 
-    // The one translated shape. Everything above this line has already run, so
-    // this path is authenticated, scoped, size-capped and blocked exactly like
-    // a piped one; only the body handling below differs.
+    // The translated shapes. Everything above this line has already run, so
+    // these paths are authenticated, scoped, size-capped and blocked exactly
+    // like a piped one; only the body handling below differs.
     if (route.translated) {
       if (route.generating) inFlight += 1;
       const finished = (r: { status: number; bytes: number; tokens: number; ttftMs: number | null }): void => {
@@ -172,9 +199,21 @@ export function createProxyServer(service: ServiceDef): http.Server {
         }
         finish(r.status, undefined, r.bytes);
       };
-      const work = path === '/v1/messages/count_tokens'
-        ? handleCountTokens(req, res).then((status) => ({ status, bytes: 0, tokens: 0, ttftMs: null }))
-        : handleMessages(req, res, service.upstream, started);
+      // Dispatched on the name in the route table rather than on the path, so
+      // adding a translated route is one line there and not two places here.
+      const nothing = { bytes: 0, tokens: 0, ttftMs: null };
+      const work = (() => {
+        switch (route.translated) {
+          // Each carries the agent. A translator left without one would reach
+          // the upstream directly while every piped route on the same service
+          // went through the operator's proxy — succeeding, and saying nothing
+          // about the difference.
+          case 'messages': return handleMessages(req, res, service.upstream, started, agent);
+          case 'count_tokens': return handleCountTokens(req, res).then((status) => ({ status, ...nothing }));
+          case 'images': return handleImages(req, res, service.upstream, started, agent);
+          case 'image_models': return handleImageModels(res, service.upstream, agent).then((status) => ({ status, ...nothing }));
+        }
+      })();
       void work.then(finished, (err: Error) => {
         // The handler owns its own error responses; reaching here means it
         // threw before sending one, which must not leave the socket open.
@@ -214,6 +253,7 @@ export function createProxyServer(service: ServiceDef): http.Server {
         method,
         path: req.url,
         headers,
+        ...(agent ? { agent } : {}),
       },
       (upstreamRes) => {
         const out: http.OutgoingHttpHeaders = {};

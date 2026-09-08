@@ -33,22 +33,35 @@ listening on your home connection, and no third party in the middle.
 
 ## What you get
 
-**Five endpoints, four of them optional.** Chat and embeddings (Ollama) are
-always on; dictation (whisper.cpp), images (Stable Diffusion), video (ComfyUI,
-which also runs the newer image models and the music ones) and speech
-synthesis (Kokoro) are off until you ask for them. Each is a separate port with
-its own allowlist, and one SSH session carries whichever you enable. They share
-a GPU, so the console adds up what they want and tells you when the set will
-not fit — see [docs/SERVICES.md](docs/SERVICES.md).
+**Four endpoints, three of them optional.** Chat and embeddings (Ollama) are
+always on; dictation (whisper.cpp), images and video and music (ComfyUI, which
+runs all three because they are all diffusion graphs) and speech synthesis
+(Kokoro) are off until you ask for them. Each is a separate port with its own
+allowlist, and one SSH session carries whichever you enable. They share a GPU,
+so the console adds up what they want and tells you when the set will not fit
+— see [docs/SERVICES.md](docs/SERVICES.md).
 
 **A model endpoint anything can use.** An API that requires a bearer token,
 exposing exactly the endpoints a client actually calls and refusing everything
 else. Chat answers all three shapes a client is likely to be written against —
 Ollama's own, OpenAI's `/v1`, and Anthropic's `/v1/messages` — and the other
-services speak the OpenAI shapes their clients already expect. Streaming
-passes straight through, so answers still appear token by token; the two
-Anthropic routes are the one exception and are translated rather than piped,
-which [docs/SERVICES.md](docs/SERVICES.md) explains in full.
+services speak the OpenAI shapes their clients already expect, including
+`POST /v1/images/generations` for pictures, so nothing has to learn ComfyUI's
+graph format to ask for one. Streaming passes straight through, so answers
+still appear token by token; the Anthropic and images routes are the
+exceptions and are translated rather than piped, which
+[docs/SERVICES.md](docs/SERVICES.md) explains in full.
+
+**A proxy per service, if you want one.** Each of the four services has its own
+upstream address and its own proxy field. Empty is a direct connection;
+`socks5h://127.0.0.1:9150` routes that one service through Tor and leaves the
+others alone — which is the point, since a chat model on a rented box and a
+whisper container one bridge away are not the same journey. A URL rather than a
+switch, so perch holds no opinion about which port Tor listens on and the same
+field covers a jump host. A proxy that will not parse is refused rather than
+ignored, because falling back to a direct connection would succeed and say
+nothing about it. The SOCKS5 client is ninety lines of `node:net` — see below
+on runtime dependencies.
 
 **Containers you can size.** Each one has a memory and CPU ceiling you set from
 the console. They are written into `.env`, which compose reads when it
@@ -291,7 +304,7 @@ including what perch does *not* protect against.
 | | |
 |---|---|
 | [SETUP.md](docs/SETUP.md) | Installing, in more detail than the installer gives you |
-| [SERVICES.md](docs/SERVICES.md) | Chat, dictation and images: what each exposes, and why they share one app |
+| [SERVICES.md](docs/SERVICES.md) | Chat, dictation, images, video and speech: what each exposes, and why they share one app |
 | [REMOTE.md](docs/REMOTE.md) | The tunnel: how it works, how to do it by hand, why each option is there |
 | [TERN.md](docs/TERN.md) | Pointing Tern at perch, and choosing a model for email |
 | [SECURITY.md](docs/SECURITY.md) | Threat model, what is exposed, what is not |

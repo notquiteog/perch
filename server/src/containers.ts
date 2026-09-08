@@ -1,6 +1,6 @@
 // How big each container is allowed to be.
 //
-// perch runs six containers at most, on one machine, sharing one card and one
+// perch runs five containers at most, on one machine, sharing one card and one
 // pool of system memory. Left alone they each take whatever they can get,
 // which is fine until the day ComfyUI decodes a long clip, the kernel picks a
 // process to kill, and the thing it picks is Ollama in the middle of somebody
@@ -76,16 +76,6 @@ export const CONTAINERS: ContainerDef[] = [
     note: 'Transcription. Small unless you run a large model on the CPU, where the weights are in system memory and this is what holds them.',
   },
   {
-    id: 'sd',
-    label: 'Stable Diffusion',
-    service: 'image',
-    memKey: 'SD_MEM_LIMIT',
-    cpuKey: 'SD_CPUS',
-    defaultMem: '12g',
-    floorBytes: 4e9,
-    note: 'Image generation. It loads a checkpoint into system memory before moving it to the card, so the limit has to clear the largest checkpoint you use, not the amount it settles at.',
-  },
-  {
     id: 'comfy',
     label: 'ComfyUI',
     service: 'video',
@@ -93,7 +83,7 @@ export const CONTAINERS: ContainerDef[] = [
     cpuKey: 'COMFY_CPUS',
     defaultMem: '24g',
     floorBytes: 8e9,
-    note: 'Video, and the newer image and music models. The hungriest container here by a distance: it decodes whole clips in memory and offloads model parts back to the host when the card is full, so a tight limit here shows up as an out-of-memory kill mid-render.',
+    note: 'Video, images and music — every diffusion model perch runs is a graph in here. The hungriest container by a distance: it decodes whole clips in memory and offloads model parts back to the host when the card is full, so a tight limit here shows up as an out-of-memory kill mid-render.',
   },
   {
     id: 'kokoro',

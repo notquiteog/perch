@@ -14,8 +14,7 @@ socket.
 |---|---|---|---|---|
 | **Chat** | 11434 | Ollama | Text and embeddings | Drafting, replies, rewrites, subject lines, search |
 | **Dictation** | 8080 | whisper.cpp | Speech to text | The dictation key |
-| **Images** | 7860 | Stable Diffusion | Images from a prompt | Nothing — see below |
-| **Video** | 8188 | ComfyUI | Video, and the newer image and music models | Nothing |
+| **Video and images** | 8188 | ComfyUI | Images, video and music from a prompt | Nothing — see below |
 | **Audio** | 8880 | Kokoro | Text to speech | Nothing |
 
 Each is the port that service is conventionally found on when it is run by
@@ -26,16 +25,16 @@ and keep these same numbers on the compose network where only perch can reach
 them. If something on this machine already holds one, the installer publishes
 that service one port along and says so.
 
-Chat is always on. The other four are off unless you ask for them, because each
-is another claim on the same GPU.
+Chat is always on. The other three are off unless you ask for them, because
+each is another claim on the same GPU.
 
-Three of the five have no use in Tern at all, and that is the point rather than
+Two of the four have no use in Tern at all, and that is the point rather than
 an oversight: perch is a model host that Tern happens to be a client of. The
 endpoints are ordinary HTTP with a bearer token, and the shapes are the ones a
 client is likely to be written against already — Ollama's, OpenAI's and
 Anthropic's.
 
-## Why one app rather than five
+## Why one app rather than four
 
 The tunnel, the host helper, the token store, the console and the installer are
 the hard parts, and they are identical for all of them. A separate app per
@@ -46,8 +45,7 @@ carries every service instead:
 ```
 -R 10.89.0.1:11434:127.0.0.1:11434   # chat
 -R 10.89.0.1:8080:127.0.0.1:8080     # dictation
--R 10.89.0.1:7860:127.0.0.1:7860     # images
--R 10.89.0.1:8188:127.0.0.1:8188     # video
+-R 10.89.0.1:8188:127.0.0.1:8188     # images and video
 -R 10.89.0.1:8880:127.0.0.1:8880     # audio
 ```
 
@@ -168,6 +166,61 @@ Everything else crosses: the system prompt (lifted back into the message list),
 tool definitions and tool results, `max_tokens` as `num_predict`, temperature,
 top-p, top-k, stop sequences, and `thinking` as Ollama's `think`.
 
+## Reaching an upstream through a proxy
+
+Each service has its own upstream address — `PERCH_OLLAMA_URL`,
+`PERCH_WHISPER_URL`, `PERCH_COMFY_URL`, `PERCH_TTS_URL` — because they are four
+different servers, usually four different containers. Each also has its own
+**proxy field**, which is the other half of "how do we reach it":
+
+| Service | Upstream | Proxy |
+|---|---|---|
+| Chat | `PERCH_OLLAMA_URL` | `PERCH_CHAT_PROXY` |
+| Dictation | `PERCH_WHISPER_URL` | `PERCH_VOICE_PROXY` |
+| Video and images | `PERCH_COMFY_URL` | `PERCH_VIDEO_PROXY` |
+| Audio | `PERCH_TTS_URL` | `PERCH_AUDIO_PROXY` |
+
+Empty is a direct connection, which is the default and what a machine hosting
+its own models wants. Set one to `socks5h://127.0.0.1:9150` and that service —
+and only that service — reaches its upstream through Tor.
+
+**Why a proxy URL and not a "use Tor" switch.** A switch would have to be
+paired with an address somewhere, and perch would then own an opinion about
+which port Tor listens on: 9050 for the C daemon, 9150 for Arti, something else
+again for a proxy in another container. A field holding
+`socks5h://127.0.0.1:9150` says the same thing without the opinion, in a form
+already familiar from every other tool that takes one — and it generalises for
+free to a jump host or any other SOCKS proxy.
+
+**Prefer `socks5h://` to `socks5://`.** The `h` means the *proxy* resolves the
+hostname. That is the only way an `.onion` address works at all, and for an
+ordinary hostname it stops this machine's resolver — and therefore its network
+— being told which upstream is about to be contacted while the bytes travel
+through the proxy. Routing the traffic and leaking the name is most of the cost
+and none of the benefit. `socks5://`, `socks4a://` and `socks4://` are honoured
+as written, because somebody who typed one meant it.
+
+**Per service, because the journeys differ.** A chat model on a rented box
+across the internet and a whisper container one bridge away are not the same
+journey. One setting for the whole box would force an operator to route the
+near one the way the far one needs — either a leak or pointless latency,
+depending which way they resolved it.
+
+**A proxy that will not parse is refused, not ignored.** The service answers
+502 naming the setting, and nothing reaches the upstream. Falling back to a
+direct connection would send traffic somewhere the operator specifically said
+not to and say nothing about it — and it would succeed, which is what makes
+that failure mode so much worse than an error.
+
+The setting is read per request, so changing it in the console takes effect on
+the next call rather than the next restart. That matters most for exactly this
+setting: a wrong proxy is a service that has stopped answering.
+
+The SOCKS5 client is hand-written in `server/src/upstream.ts` against
+`node:net`. `socks-proxy-agent` would have been four lines instead of ninety
+and also the first runtime dependency in a component whose whole design is not
+having any — see CONTRIBUTING.md.
+
 ## Dictation
 
 whisper.cpp behind its bundled server, told by `--inference-path` to serve at
@@ -211,31 +264,7 @@ a container are host operations. Without the helper the card still reports
 which model is in use and whether it is answering, and says the change has to
 be made on the host.
 
-## Images
-
-Stable Diffusion behind an A1111-compatible API. perch exposes generation and
-the read-only queries needed to drive it:
-
-```
-POST /sdapi/v1/txt2img       POST /sdapi/v1/img2img
-GET  /sdapi/v1/sd-models     GET  /sdapi/v1/samplers
-GET  /sdapi/v1/progress      GET  /sdapi/v1/memory
-```
-
-The rest of that API is mostly concerned with reconfiguring the server —
-changing checkpoints, reloading, running scripts — and none of it is something
-a token from another machine should be able to do, so none of it is routable.
-
-**Nothing in Tern uses this.** Tern is an email client and has no
-image-generation feature. It is here because the machinery was already built
-and a local image model is useful to have on the same box; if you want it for
-something else on your network, the endpoint is a normal HTTP API with a bearer
-token.
-
-The container image is community-maintained — upstream publishes none — so pin
-a digest in `SD_IMAGE` if that matters to you.
-
-## Video
+## Video and images
 
 ComfyUI, which is a different shape from everything else here. It does not take
 a prompt and return a file — it takes a *workflow*, a graph of nodes naming the
@@ -260,10 +289,58 @@ image-to-video has no other way in. It writes into ComfyUI's input directory
 and nowhere else; `PERCH_MAX_BODY_BYTES` is what stops it being a way to fill
 the disk.
 
-The same container is what runs FLUX for images and ACE-Step for music, because
-they are diffusion graphs too — Stable Diffusion's web UI cannot load either.
-So switching video on adds three families of model rather than one, and the
-console says beside each entry which container it needs.
+The same container runs every diffusion model perch offers — SD 1.5 and SDXL
+checkpoints, FLUX, video, and ACE-Step for music — because they are all graphs.
+So switching this on adds three families of model rather than one.
+
+### Images, without building a graph
+
+A workflow is the right interface for video, where the job genuinely differs
+each time. It is a poor one for "give me a picture of a heron", and it is not
+what any image client is written against. So images also get the OpenAI shape,
+translated on the way through:
+
+```
+POST /v1/images/generations
+GET  /v1/models
+```
+
+`POST /v1/images/generations` takes OpenAI's fields — `prompt`, `model`, `n`,
+`size` — and builds the graph itself: load the checkpoint, encode the prompt,
+sample, decode, return the picture as `b64_json`. `GET /v1/models` lists the
+checkpoints ComfyUI can see, which is how a caller learns what to put in
+`model`; a name is matched loosely, so `dreamshaper` finds
+`DreamShaper_8_pruned.safetensors`.
+
+Four fields are extensions to that API, because every image client wants them
+and OpenAI's has none of them: `negative_prompt`, `steps`, `cfg_scale` and
+`seed`. A request that sets none of them behaves like the stock ComfyUI
+text-to-image workflow.
+
+Two things are worth knowing before the first call:
+
+- **`size` defaults to 1024×1024**, which is OpenAI's default and the right one
+  for SDXL and FLUX. An **SD 1.5 checkpoint wants `"512x512"`** — above about
+  768 it produces doubled figures and repeated horizons. Pass `size`.
+- **`response_format: "url"` is refused.** perch has nowhere to host a
+  generated image, so the endpoint always answers `b64_json`, and says so
+  rather than returning a body with no `url` in it.
+
+These two routes are the only ones on any service where perch reads a request
+body rather than piping it — `/v1/messages` on chat is the other. What that
+costs, and what bounds it, is written at the top of `server/src/images.ts`.
+
+**Nothing in Tern uses this.** Tern is an email client and has no
+image-generation feature. It is here because the machinery was already built
+and a local image model is useful to have on the same box.
+
+> There used to be a second container here: Stable Diffusion's web UI, on port
+> 7860, behind its A1111 API. It installed its Python dependencies at runtime
+> from the live package index on every start, which meant it could not be
+> pinned — an image digest fixes the layers, not what pip resolves inside them
+> — and one morning a build dependency dropped a module and it stopped starting
+> at all, with nothing on the machine having changed. ComfyUI loads the same
+> checkpoint files, so the models moved across and the container went away.
 
 ## Audio
 

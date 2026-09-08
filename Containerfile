@@ -47,7 +47,7 @@ USER node
 # Console, chat, and the four optional services — dictation, images, video,
 # audio — on the ports each of those is conventionally found on. Whether one
 # is listening depends on PERCH_SERVICES; EXPOSE only documents the set.
-EXPOSE 8099 11434 8080 7860 8188 8880
+EXPOSE 8099 11434 8080 8188 8880
 # No HEALTHCHECK here: podman builds OCI images by default, which have no
 # field for one, and it would be silently dropped. It lives in compose.yml
 # instead, where it is actually run.

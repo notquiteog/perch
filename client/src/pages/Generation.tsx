@@ -22,7 +22,7 @@ const FAMILIES: Array<{ id: MediaFamily; title: string; sub: string }> = [
   {
     id: 'image',
     title: 'Image generation',
-    sub: 'Checkpoints for the image service. Sizes are the download; the note beside each is about the memory it wants while it works.',
+    sub: 'Checkpoints for the video service’s container, which runs every diffusion model here. Sizes are the download; the note beside each is about the memory it wants while it works.',
   },
   {
     id: 'video',
@@ -38,15 +38,29 @@ const FAMILIES: Array<{ id: MediaFamily; title: string; sub: string }> = [
 
 /** Which service has to be running for a model to be usable, in words. */
 const SERVICE_LABEL: Record<string, string> = {
-  image: 'image service',
   video: 'video service',
   audio: 'audio service',
 };
 
 const OVERLAY: Record<string, string> = {
-  image: 'compose.image.yml',
   video: 'compose.video.yml',
   audio: 'compose.audio.yml',
+};
+
+/**
+ * The service a card is actually about.
+ *
+ * This used to be the card's own id: the image family ran on the image
+ * service, video on video, audio on audio, and only two stragglers ran
+ * somewhere else. Images no longer have a service of their own — they are
+ * ComfyUI graphs exactly like the video ones — so the family and the service
+ * behind it have different names, and a card that assumed they matched would
+ * name the wrong container when something is off.
+ */
+const PRIMARY_SERVICE: Record<MediaFamily, string> = {
+  image: 'video',
+  video: 'video',
+  audio: 'audio',
 };
 
 export default function Generation() {
@@ -103,12 +117,13 @@ export default function Generation() {
               </div>
             }
           >
-            {/* The notices are about this card's own service only. A family
-                can include a model that runs elsewhere — FLUX and ACE-Step
-                are ComfyUI workflows — and repeating the video service's
-                state on three cards is noise. The badge above and the tag on
-                the row say where those run. */}
-            {services.filter((id) => id === family.id).map((id) => {
+            {/* The notices are about the service this card depends on. Images
+                and video now share one, so the same notice can appear on two
+                cards — which is right rather than noisy: both families are
+                unusable while that container is off, and somebody reading the
+                image card should not have to scroll to the video one to find
+                out why nothing works. */}
+            {services.filter((id) => id === PRIMARY_SERVICE[family.id]).map((id) => {
               const s = statusOf(id);
               if (!s || s.enabled) return null;
               return (
@@ -121,7 +136,7 @@ export default function Generation() {
                 </Notice>
               );
             })}
-            {services.filter((id) => id === family.id).map((id) => {
+            {services.filter((id) => id === PRIMARY_SERVICE[family.id]).map((id) => {
               const s = statusOf(id);
               if (!s?.enabled || s.ok || !s.starting) return null;
               return (

@@ -1,4 +1,4 @@
-# Optional overlay: video generation.
+# Optional overlay: video, image and music generation.
 #
 # ComfyUI, which is a different shape from the other backends here. It does not
 # take a prompt and return a picture — it takes a *workflow*, a graph of nodes
@@ -8,10 +8,19 @@
 # volume.
 #
 # That is also why this container earns its keep beyond video. The same graph
-# runner is what runs FLUX for images and ACE-Step for music, neither of which
-# Stable Diffusion's web UI can load — so enabling this adds three families of
-# model rather than one, and the console's Models page says which container
-# each of its entries needs.
+# runner is what runs every diffusion model perch offers — SD 1.5 and SDXL
+# checkpoints, FLUX for images, ACE-Step for music — so enabling this adds
+# three families of model rather than one.
+#
+# It used to be two containers. Images had a Stable Diffusion web UI of their
+# own until that container turned out to install its Python dependencies at
+# runtime from the live package index, on every start, and broke on a morning
+# when nothing here had changed. An image digest could not have pinned that:
+# it fixes the layers, not what pip resolves inside them. ComfyUI loads the
+# same checkpoint files, so nothing was lost but the container — and images
+# gained a plainer endpoint than the one they had, because perch now answers
+# OpenAI's /v1/images/generations in front of this and builds the graph
+# itself. See server/src/images.ts.
 #
 # What it costs, and it is the most expensive thing perch runs. A 5B video
 # model with its text encoder is around 14 GB on the card while it works, and

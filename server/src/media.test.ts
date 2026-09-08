@@ -23,26 +23,27 @@ const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'perch-media-test-'));
 process.env.PERCH_STATE_DIR = stateDir;
 
 process.env.PERCH_LOG_LEVEL = 'error';
-process.env.PERCH_SERVICES = 'chat,image';
+process.env.PERCH_SERVICES = 'chat,video';
 
-// A stand-in Stable Diffusion: /internal/ping to say it is up, and the
-// checkpoint list, which is the only way the console learns what is there.
-let checkpoints: Array<{ title: string; model_name: string; filename: string }> = [];
+// A stand-in ComfyUI: /system_stats to say it is up, and one weight list per
+// model directory, which is the only way the console learns what is there.
+// One container answers for images, video and music now, so this is the whole
+// of the generation side.
+let weights: Record<string, string[]> = {};
 const upstream = http.createServer((req, res) => {
-  if (req.url === '/internal/ping') { res.writeHead(200); res.end('{}'); return; }
-  if (req.url === '/sdapi/v1/sd-models') {
+  const path = (req.url ?? '').split('?')[0] ?? '';
+  if (path === '/system_stats') { res.writeHead(200); res.end('{}'); return; }
+  const kind = path.startsWith('/models/') ? path.slice('/models/'.length) : null;
+  if (kind) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(checkpoints));
+    res.end(JSON.stringify(weights[kind] ?? []));
     return;
   }
   res.writeHead(404); res.end();
 });
 await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
 const port = (upstream.address() as { port: number }).port;
-process.env.PERCH_SD_URL = `http://127.0.0.1:${port}`;
-// Nothing listens here, which is what a service that is switched on but still
-// unpacking its image looks like.
-process.env.PERCH_COMFY_URL = 'http://127.0.0.1:1';
+process.env.PERCH_COMFY_URL = `http://127.0.0.1:${port}`;
 
 const media = await import('./media.js');
 
@@ -92,8 +93,8 @@ test('anything fetchable belongs to a service with a model store', () => {
 });
 
 test('a live backend reports what it can see, and only that', async () => {
-  checkpoints = [{ title: 'v1-5-pruned-emaonly.safetensors [abc]', model_name: 'v1-5-pruned-emaonly', filename: '/models/Stable-diffusion/v1-5-pruned-emaonly.safetensors' }];
-  const status = await media.mediaStatus('image');
+  weights = { checkpoints: ['v1-5-pruned-emaonly.safetensors'] };
+  const status = await media.mediaStatus('video');
   assert.equal(status.ok, true);
   assert.deepEqual(status.installed, ['v1-5-pruned-emaonly.safetensors']);
 
@@ -109,15 +110,15 @@ test('a live backend reports what it can see, and only that', async () => {
 // download.
 test('a model with a file missing is not installed', async () => {
   const ltx = media.MEDIA_MODELS.find((m) => m.id === 'ltxv-2b')!;
-  const half = { ...(await media.mediaStatus('image')), ok: true, installed: [ltx.files[0]!.dest.split('/').pop()!] };
+  const half = { ...(await media.mediaStatus('video')), ok: true, installed: [ltx.files[0]!.dest.split('/').pop()!] };
   assert.equal(media.isInstalled(ltx, half), false);
   const whole = { ...half, installed: ltx.files.map((f) => f.dest.split('/').pop()!) };
   assert.equal(media.isInstalled(ltx, whole), true);
 });
 
 test('a service that is off says so rather than looking broken', async () => {
-  // 'video' is not in PERCH_SERVICES for this test run.
-  const status = await media.mediaStatus('video');
+  // 'audio' is not in PERCH_SERVICES for this test run.
+  const status = await media.mediaStatus('audio');
   assert.equal(status.enabled, false);
   assert.equal(status.ok, false);
   assert.equal(status.starting, false);
@@ -131,7 +132,7 @@ test('a service that is off says so rather than looking broken', async () => {
 // for a fault that does not exist.
 test('nothing is installed while the backend is unreachable', async () => {
   const model = media.MEDIA_MODELS.find((m) => m.id === 'sd15')!;
-  const down = { ...(await media.mediaStatus('image')), ok: false, installed: [model.files[0]!.dest.split('/').pop()!] };
+  const down = { ...(await media.mediaStatus('video')), ok: false, installed: [model.files[0]!.dest.split('/').pop()!] };
   assert.equal(media.isInstalled(model, undefined), false);
   assert.equal(media.isInstalled(model, down), false, 'a stale list from a backend that is not answering is not evidence');
 });

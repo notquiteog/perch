@@ -121,7 +121,6 @@ compose_image_for() {
   case "$svc" in
     ollama)  file="compose.yml" ;;
     whisper) file="compose.voice.yml" ;;
-    sd)      file="compose.image.yml" ;;
     comfy)   file="compose.video.yml" ;;
     kokoro)  file="compose.audio.yml" ;;
     *)       return 0 ;;
@@ -317,7 +316,6 @@ PERCH_STATE_DIR="${PERCH_STATE_DIR:-/var/lib/perch}"
 # then, the first switched-on optional service ended the install with
 # `!var: unbound variable`. These match the defaults in the compose overlays.
 PERCH_VOICE_PORT="${PERCH_VOICE_PORT:-8080}"
-PERCH_IMAGE_PORT="${PERCH_IMAGE_PORT:-7860}"
 PERCH_VIDEO_PORT="${PERCH_VIDEO_PORT:-8188}"
 PERCH_AUDIO_PORT="${PERCH_AUDIO_PORT:-8880}"
 ask PERCH_CONSOLE_PORT "Console port (on 127.0.0.1)" "${PERCH_CONSOLE_PORT:-8099}"
@@ -348,13 +346,15 @@ warn_if_tight() {
   note "the console's Services panel shows the running total"
 }
 
-ask_yn IMAGE_ENABLED "Add image generation (Stable Diffusion, 4-10 GB on the card)?" "${IMAGE_ENABLED:-n}"
-[ "$IMAGE_ENABLED" = y ] && warn_if_tight 4500 "Stable Diffusion"
-
-ask_yn VIDEO_ENABLED "Add video generation (ComfyUI, 8-30 GB on the card)?" "${VIDEO_ENABLED:-n}"
+# One question for three families, because one container runs all of them.
+# An image model here is 4-10 GB and a video model 8-30, and the warning is
+# about the video end because that is the one that will not fit beside a chat
+# model on a 16 GB card.
+ask_yn VIDEO_ENABLED "Add image, video and music generation (ComfyUI, 4-30 GB on the card)?" "${VIDEO_ENABLED:-n}"
 if [ "$VIDEO_ENABLED" = y ]; then
   warn_if_tight 12000 "a video model"
-  note "the same container runs FLUX for images and ACE-Step for music"
+  note "one container runs Stable Diffusion checkpoints, FLUX, video and ACE-Step"
+  note "images also get a plain OpenAI endpoint: POST /v1/images/generations"
   note "models are files rather than tags: the console's Models page lists them,"
   note "and ./bin/perch fetch <model> downloads one"
 fi
@@ -386,7 +386,6 @@ fi
 
 PERCH_SERVICES="chat"
 [ "$VOICE_ENABLED" = y ] && PERCH_SERVICES="$PERCH_SERVICES,voice"
-[ "$IMAGE_ENABLED" = y ] && PERCH_SERVICES="$PERCH_SERVICES,image"
 [ "$VIDEO_ENABLED" = y ] && PERCH_SERVICES="$PERCH_SERVICES,video"
 [ "$AUDIO_ENABLED" = y ] && PERCH_SERVICES="$PERCH_SERVICES,audio"
 ok "services: $PERCH_SERVICES"
@@ -411,11 +410,10 @@ next_free() {
   printf '%s' "$p"
 }
 for spec in "PERCH_CONSOLE_PORT console" "PERCH_PROXY_PORT chat" "PERCH_VOICE_PORT dictation" \
-            "PERCH_IMAGE_PORT images" "PERCH_VIDEO_PORT video" "PERCH_AUDIO_PORT audio"; do
+            "PERCH_VIDEO_PORT video" "PERCH_AUDIO_PORT audio"; do
   var="${spec%% *}"; label="${spec##* }"
   case "$label" in
     dictation) [ "$VOICE_ENABLED" = y ] || continue ;;
-    images)    [ "$IMAGE_ENABLED" = y ] || continue ;;
     video)     [ "$VIDEO_ENABLED" = y ] || continue ;;
     audio)     [ "$AUDIO_ENABLED" = y ] || continue ;;
   esac
@@ -431,14 +429,12 @@ for spec in "PERCH_CONSOLE_PORT console" "PERCH_PROXY_PORT chat" "PERCH_VOICE_PO
 done
 port_summary="console $PERCH_CONSOLE_PORT, chat $PERCH_PROXY_PORT"
 [ "$VOICE_ENABLED" = y ] && port_summary="$port_summary, dictation $PERCH_VOICE_PORT"
-[ "$IMAGE_ENABLED" = y ] && port_summary="$port_summary, images $PERCH_IMAGE_PORT"
 [ "$VIDEO_ENABLED" = y ] && port_summary="$port_summary, video $PERCH_VIDEO_PORT"
 [ "$AUDIO_ENABLED" = y ] && port_summary="$port_summary, audio $PERCH_AUDIO_PORT"
 ok "ports: $port_summary"
 
 COMPOSE_FILE="compose.yml"
 [ "$VOICE_ENABLED" = y ] && COMPOSE_FILE="$COMPOSE_FILE:compose.voice.yml"
-[ "$IMAGE_ENABLED" = y ] && COMPOSE_FILE="$COMPOSE_FILE:compose.image.yml"
 [ "$VIDEO_ENABLED" = y ] && COMPOSE_FILE="$COMPOSE_FILE:compose.video.yml"
 [ "$AUDIO_ENABLED" = y ] && COMPOSE_FILE="$COMPOSE_FILE:compose.audio.yml"
 # The GPU overlay is appended, never assigned. Assigning here is what used to
@@ -459,7 +455,6 @@ esac
 # and video is hours per clip. The overlay is generated because it may only
 # name the services this install actually has.
 MEDIA_GPU_SERVICES=""
-[ "$IMAGE_ENABLED" = y ] && MEDIA_GPU_SERVICES="$MEDIA_GPU_SERVICES sd"
 [ "$VIDEO_ENABLED" = y ] && MEDIA_GPU_SERVICES="$MEDIA_GPU_SERVICES comfy"
 [ "$AUDIO_ENABLED" = y ] && [ "$GPU_KIND" = nvidia ] && MEDIA_GPU_SERVICES="$MEDIA_GPU_SERVICES kokoro"
 if [ -n "$MEDIA_GPU_SERVICES" ] && [ "$GPU_KIND" != none ]; then
@@ -525,7 +520,6 @@ PERCH_MAX_CONCURRENT=$(( OLLAMA_NUM_PARALLEL + 2 ))
 # have an image generator on a port.
 PERCH_SERVICES=$PERCH_SERVICES
 PERCH_VOICE_PORT=$PERCH_VOICE_PORT
-PERCH_IMAGE_PORT=$PERCH_IMAGE_PORT
 PERCH_VIDEO_PORT=$PERCH_VIDEO_PORT
 PERCH_AUDIO_PORT=$PERCH_AUDIO_PORT
 WHISPER_MODEL=${WHISPER_MODEL:-base}
@@ -542,8 +536,6 @@ OLLAMA_MEM_LIMIT=${OLLAMA_MEM_LIMIT:-}
 OLLAMA_CPUS=${OLLAMA_CPUS:-0}
 WHISPER_MEM_LIMIT=${WHISPER_MEM_LIMIT:-2g}
 WHISPER_CPUS=${WHISPER_CPUS:-0}
-SD_MEM_LIMIT=${SD_MEM_LIMIT:-12g}
-SD_CPUS=${SD_CPUS:-0}
 COMFY_MEM_LIMIT=${COMFY_MEM_LIMIT:-24g}
 COMFY_CPUS=${COMFY_CPUS:-0}
 KOKORO_MEM_LIMIT=${KOKORO_MEM_LIMIT:-4g}
@@ -643,10 +635,9 @@ $B  perch is installed.$N
   Model endpoint 127.0.0.1:$PERCH_PROXY_PORT  ${D}(loopback only, for the tunnel)${N}
 EOF
 [ "$VOICE_ENABLED" = y ] && printf '  Dictation      127.0.0.1:%s\n' "$PERCH_VOICE_PORT"
-[ "$IMAGE_ENABLED" = y ] && printf '  Images         127.0.0.1:%s\n' "$PERCH_IMAGE_PORT"
-[ "$VIDEO_ENABLED" = y ] && printf '  Video          127.0.0.1:%s\n' "$PERCH_VIDEO_PORT"
+[ "$VIDEO_ENABLED" = y ] && printf '  Images, video  127.0.0.1:%s\n' "$PERCH_VIDEO_PORT"
 [ "$AUDIO_ENABLED" = y ] && printf '  Audio          127.0.0.1:%s\n' "$PERCH_AUDIO_PORT"
-if [ "$VIDEO_ENABLED" = y ] || [ "$IMAGE_ENABLED" = y ]; then
+if [ "$VIDEO_ENABLED" = y ]; then
   printf '\n  %sImage and video models are files rather than tags: the console'"'"'s Models%s\n' "$D" "$N"
   printf '  %spage lists them, and ./bin/perch fetch <model> downloads one.%s\n' "$D" "$N"
 fi

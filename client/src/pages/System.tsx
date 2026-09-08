@@ -267,7 +267,7 @@ export default function System() {
 
       <Card title="Logs">
         <div className="row">
-          {(['perch', 'ollama', 'whisper', 'sd', 'comfy', 'kokoro', 'tunnel'] as const).map((s) => (
+          {(['perch', 'ollama', 'whisper', 'comfy', 'kokoro', 'tunnel'] as const).map((s) => (
             <button key={s} className="sm" disabled={!hostUp || busy !== null}
               onClick={() => void (async () => {
                 setBusy(s);

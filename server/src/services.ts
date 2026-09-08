@@ -12,7 +12,31 @@
 // have an image generator listening on it.
 import { config } from './config.js';
 
-export type ServiceId = 'chat' | 'voice' | 'image' | 'video' | 'audio';
+export type ServiceId = 'chat' | 'voice' | 'video' | 'audio';
+
+/**
+ * Which translator answers a route, for the ones perch does not pipe.
+ *
+ * A string rather than a boolean because there are now two backends being
+ * translated for — Ollama into Anthropic's shape, ComfyUI into OpenAI's — and
+ * the proxy has to know which. Naming the handler here rather than matching on
+ * the path there keeps the route table the single place a route is described.
+ */
+export type Translator = 'messages' | 'count_tokens' | 'images' | 'image_models';
+
+/**
+ * The wire shapes a service answers, as data rather than as prose.
+ *
+ * `speaks` below says the same thing in a sentence, and that sentence is for a
+ * person reading the console. This is for everything else: the console renders
+ * a badge per shape, and a client asking what an address is can be told
+ * without parsing English.
+ *
+ * They are shapes, not companies and not backends. `openai` here means "the
+ * OpenAI-compatible shape", which is what whisper.cpp and Kokoro serve
+ * natively and what `images.ts` translates ComfyUI into.
+ */
+export type ApiShape = 'ollama' | 'openai' | 'anthropic' | 'comfyui';
 
 export interface Route {
   method: string;
@@ -22,14 +46,14 @@ export interface Route {
   /** Needs the 'manage' scope rather than 'use'. */
   manage?: boolean;
   /**
-   * Answered by a translator rather than piped upstream.
+   * Answered by a translator rather than piped upstream, and by which one.
    *
    * Everything else here is a straight pipe: perch never sees the body. A
-   * translated route is the exception and the flag is deliberately explicit,
-   * so the one property the proxy's header comment claims for the whole file
-   * can be checked against a list rather than remembered.
+   * translated route is the exception and it is deliberately explicit, so the
+   * one property the proxy's header comment claims for the whole file can be
+   * checked against a list rather than remembered.
    */
-  translated?: boolean;
+  translated?: Translator;
 }
 
 export interface ServiceDef {
@@ -53,6 +77,23 @@ export interface ServiceDef {
    * which is the difference between an address and a usable endpoint.
    */
   speaks: string;
+  /** The same, as data. See `ApiShape`. */
+  api: ApiShape[];
+  /**
+   * The environment variable holding this service's proxy, if it has one set.
+   *
+   * Each service reaches its own upstream, and each may reach it its own way:
+   * a chat model on a rented box across the internet and a whisper container
+   * one bridge away are not the same journey and should not share a decision.
+   * Empty is a direct connection, which is what every service does by default
+   * and what a machine hosting its own models wants.
+   *
+   * The value is a proxy URL — `socks5h://127.0.0.1:9150` for Tor — rather
+   * than a switch, so perch holds no opinion about which port Tor listens on
+   * and the same field covers a jump host or any other SOCKS proxy. See
+   * `upstream.ts`.
+   */
+  proxyEnv: string;
   /**
    * What to put in Tern for it, or null if Tern has no setting for it.
    *
@@ -72,6 +113,8 @@ export const SERVICES: ServiceDef[] = [
     overlay: null, // always in the base compose file
     container: 'ollama',
     speaks: 'Ollama’s API, OpenAI’s /v1 chat, completions and embeddings, and Anthropic’s /v1/messages',
+    api: ['ollama', 'openai', 'anthropic'],
+    proxyEnv: 'PERCH_CHAT_PROXY',
     ternField: 'Admin → AI model → Base URL',
     // Everything Tern asks Ollama for, and nothing else. Ollama's own API is
     // wider than this — /api/create, /api/push and the blob endpoints can
@@ -97,8 +140,8 @@ export const SERVICES: ServiceDef[] = [
       // because this table is what decides the token, the scope, the
       // concurrency backstop and the activity ring, and a route that skipped
       // it would skip all four.
-      { method: 'POST', path: '/v1/messages', generating: true, translated: true },
-      { method: 'POST', path: '/v1/messages/count_tokens', translated: true },
+      { method: 'POST', path: '/v1/messages', generating: true, translated: 'messages' },
+      { method: 'POST', path: '/v1/messages/count_tokens', translated: 'count_tokens' },
     ],
   },
   {
@@ -110,6 +153,8 @@ export const SERVICES: ServiceDef[] = [
     overlay: 'compose.voice.yml',
     container: 'whisper',
     speaks: 'OpenAI’s /v1/audio/transcriptions',
+    api: ['openai'],
+    proxyEnv: 'PERCH_VOICE_PROXY',
     ternField: 'Admin → AI model → Dictation → Transcriber address',
     // One endpoint. Tern posts audio to the OpenAI path, which is where
     // compose.voice.yml tells whisper.cpp to serve via --inference-path.
@@ -119,38 +164,16 @@ export const SERVICES: ServiceDef[] = [
     ],
   },
   {
-    id: 'image',
-    label: 'Images',
-    blurb: 'Image generation. Stable Diffusion behind an A1111-compatible API, for anything on your network that wants a local image model.',
-    port: config.imagePort,
-    upstream: config.sdUrl,
-    overlay: 'compose.image.yml',
-    container: 'sd',
-    speaks: 'the A1111 /sdapi/v1 generation endpoints',
-    ternField: null,
-    // The A1111 API is large and mostly concerned with changing the server's
-    // own configuration. Only generation and the read-only queries needed to
-    // drive it are exposed: nothing here can install a model, run a script, or
-    // rewrite the server's settings.
-    routes: [
-      { method: 'POST', path: '/sdapi/v1/txt2img', generating: true },
-      { method: 'POST', path: '/sdapi/v1/img2img', generating: true },
-      { method: 'GET', path: '/sdapi/v1/sd-models' },
-      { method: 'GET', path: '/sdapi/v1/samplers' },
-      { method: 'GET', path: '/sdapi/v1/progress' },
-      { method: 'GET', path: '/sdapi/v1/memory' },
-      { method: 'GET', path: '/internal/ping' },
-    ],
-  },
-  {
     id: 'video',
-    label: 'Video',
-    blurb: 'Video generation. ComfyUI, which runs a workflow rather than a single prompt — and the same container is what runs the newer image models and the music ones, because they are all diffusion graphs.',
+    label: 'Video and images',
+    blurb: 'Video, images and music. ComfyUI, which runs a workflow rather than a single prompt — one graph runner for every diffusion model, because that is what they all are. Images also have a plain OpenAI-shaped endpoint in front of that, so a client that just wants a picture does not have to build a graph.',
     port: config.videoPort,
     upstream: config.comfyUrl,
     overlay: 'compose.video.yml',
     container: 'comfy',
-    speaks: 'ComfyUI’s workflow API — POST /prompt, then /history and /view',
+    speaks: 'OpenAI’s /v1/images/generations, and ComfyUI’s workflow API — POST /prompt, then /history and /view',
+    api: ['openai', 'comfyui'],
+    proxyEnv: 'PERCH_VIDEO_PROXY',
     ternField: null,
     // ComfyUI's API is small but not harmless: it can load models by name,
     // write files into its input directory, and — with the manager extension
@@ -163,6 +186,16 @@ export const SERVICES: ServiceDef[] = [
     // the user directory), and the websocket, which perch does not proxy —
     // progress is read by polling /history.
     routes: [
+      // The two OpenAI-shaped routes, which are NOT piped to ComfyUI —
+      // ComfyUI does not serve this shape, so `images.ts` translates them. A
+      // picture is one call here and three there, and the difference is the
+      // reason perch no longer runs a second container for images.
+      //
+      // They are listed in this table like everything else because the table
+      // is what decides the token, the scope, the concurrency backstop and the
+      // activity ring, and a route that skipped it would skip all four.
+      { method: 'POST', path: '/v1/images/generations', generating: true, translated: 'images' },
+      { method: 'GET', path: '/v1/models', translated: 'image_models' },
       { method: 'POST', path: '/prompt', generating: true },
       { method: 'GET', path: '/history' },
       { method: 'GET', path: '/queue' },
@@ -186,6 +219,8 @@ export const SERVICES: ServiceDef[] = [
     overlay: 'compose.audio.yml',
     container: 'kokoro',
     speaks: 'OpenAI’s /v1/audio/speech',
+    api: ['openai'],
+    proxyEnv: 'PERCH_AUDIO_PROXY',
     ternField: null,
     // The mirror image of dictation: audio out rather than in, on the OpenAI
     // path a client will already be written against.
@@ -212,8 +247,12 @@ export function serviceById(id: ServiceId): ServiceDef {
 export const SERVICE_VRAM_HINT: Record<ServiceId, number> = {
   chat: 9.4e9,   // qwen3.5:9b and up; the Models page is the real answer
   voice: 1.0e9,  // whisper small; base is about 0.4 GB
-  image: 4.5e9,  // SD 1.5 class; SDXL is nearer 10 GB
-  video: 12e9,   // a 5B video model and its text encoder; the 14B ones want a card to themselves
+  // One container now covers images, video and music, and this is the video
+  // figure because video is the expensive one: a 5B model and its text encoder,
+  // with the 14B ones wanting a card to themselves. An SD 1.5 checkpoint in the
+  // same container is nearer 4.5 GB, so a machine only generating pictures has
+  // more headroom than this says — which is the safe direction to be wrong in.
+  video: 12e9,
   audio: 1.5e9,  // Kokoro is 82M parameters — this is mostly the runtime around it
 };
 

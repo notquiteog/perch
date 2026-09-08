@@ -16,7 +16,7 @@ import { Card, CodeBlock, Copy, Empty, Notice, Spinner, Tag } from '../component
  * own on the usual one.
  */
 const SERVICE_ORDER: Array<[string, string]> = [
-  ['chat', 'Chat'], ['voice', 'Dictation'], ['image', 'Images'], ['video', 'Video'], ['audio', 'Audio'],
+  ['chat', 'Chat'], ['voice', 'Dictation'], ['video', 'Video and images'], ['audio', 'Audio'],
 ];
 
 export default function Connect() {

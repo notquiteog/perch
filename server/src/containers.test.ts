@@ -105,10 +105,10 @@ test('a container reports what it was given, not what was asked for', () => {
 
 test('a container nothing has passed a size for says so rather than guessing', () => {
   publishHostStatus([]);
-  const sd = c.containerSizes().find((r) => r.id === 'sd')!;
-  assert.equal(sd.configuredMem, null);
-  assert.equal(sd.known, false, 'the console must be able to say it is showing the default');
-  assert.equal(sd.defaultMem, '12g');
+  const comfy = c.containerSizes().find((r) => r.id === 'comfy')!;
+  assert.equal(comfy.configuredMem, null);
+  assert.equal(comfy.known, false, 'the console must be able to say it is showing the default');
+  assert.equal(comfy.defaultMem, '24g');
 });
 
 // "No limit" is a setting, not an absence — it is how compose spells it, and

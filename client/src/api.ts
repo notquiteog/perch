@@ -106,14 +106,27 @@ export interface ConnectionStatus {
   problemSays: string;
 }
 
-export type ServiceId = 'chat' | 'voice' | 'image' | 'video' | 'audio';
+export type ServiceId = 'chat' | 'voice' | 'video' | 'audio';
 
 /** One endpoint perch fronts: its port, its allowlist and what it costs. */
+/** The console's copy of perch's stored settings. */
+export interface PerchSettings {
+  allowManage: boolean;
+  keepAlive: string;
+  unloadWhenIdle: boolean;
+  /** Per service: a proxy URL for reaching its upstream, or empty for direct. */
+  proxies: Record<ServiceId, string>;
+}
+
 export interface ServiceInfo {
   id: ServiceId;
   label: string; blurb: string;
   port: number; enabled: boolean;
   overlay: string | null; ternField: string | null; speaks: string;
+  /** The same as `speaks`, as data — one badge per shape. */
+  api: Array<'ollama' | 'openai' | 'anthropic' | 'comfyui'>;
+  /** This service's own upstream, and the env var that presets its proxy. */
+  upstream: string; proxyEnv: string;
   vramHintBytes: number;
   routes: Array<{ method: string; path: string; scope: string }>;
 }
@@ -152,7 +165,7 @@ export interface Overview {
   sizing: Sizing;
   connections: Array<Connection & { status: ConnectionStatus; ternBaseUrl: string }>;
   endpointUp: boolean;
-  settings: { allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean };
+  settings: PerchSettings;
   tokens: number;
   activity: { total: number; errors: number; lastAt: string | null };
   throughput: Throughput;
@@ -176,7 +189,7 @@ export interface TokenRecord {
 }
 
 /** The compose services perch runs, which are what a restart or a log names. */
-export type ContainerName = 'perch' | 'ollama' | 'whisper' | 'sd' | 'comfy' | 'kokoro';
+export type ContainerName = 'perch' | 'ollama' | 'whisper' | 'comfy' | 'kokoro';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -276,13 +289,13 @@ export const api = {
   logs: (service: ContainerName | 'tunnel') => request<{ ok: boolean; output: string }>(`/api/logs/${service}`),
 
   settings: () => request<{
-    settings: { allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean };
+    settings: PerchSettings;
     services: ServiceInfo[];
     proxy: { maxConcurrent: number; port: number };
     hostAvailable: boolean;
   }>('/api/settings'),
-  saveSettings: (body: Partial<{ allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean }>) =>
-    request<{ settings: { allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean } }>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  saveSettings: (body: Partial<{ allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean; proxies: Partial<Record<ServiceId, string>> }>) =>
+    request<{ settings: PerchSettings }>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
   // Both halves of each knob: what .env asks for, and what the container that
   // reads it was actually created with. They differ while a change is written
   // and not applied, which is the only way to see that from the console.

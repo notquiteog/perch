@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -41,9 +42,56 @@ const upstream = http.createServer((req, res) => {
     });
     return;
   }
+  // ---- the ComfyUI side, for the images translator ----
+  //
+  // Three calls make one picture: queue the graph, wait for it to appear in
+  // the history, fetch the file. The fake answers all three in the shapes
+  // ComfyUI uses, so the translator is exercised end to end rather than
+  // mocked out one layer down.
+  const path = (req.url ?? '').split('?')[0] ?? '';
+  if (path === '/models/checkpoints') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(comfyCheckpoints));
+    return;
+  }
+  if (path === '/prompt') {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      call.body = Buffer.concat(chunks).toString('utf8');
+      // The allowlist test posts nothing at all — it is asking whether the
+      // route exists, not queueing work — so an unreadable body is normal here
+      // and must still be answered. Throwing would leave the proxy waiting out
+      // its fifteen-minute upstream idle timeout instead of failing.
+      try { queuedWorkflows.push(JSON.parse(call.body).prompt); } catch { /* not a graph */ }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ prompt_id: 'p1', number: 1 }));
+    });
+    return;
+  }
+  if (path.startsWith('/history/')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(comfyHistory));
+    return;
+  }
+  if (path === '/view') {
+    res.writeHead(200, { 'Content-Type': 'image/png' });
+    res.end(Buffer.from('PNGBYTES'));
+    return;
+  }
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ ok: true, path: req.url }));
 });
+
+/** What the fake ComfyUI says it can load, and what it says it produced. */
+let comfyCheckpoints: string[] = ['DreamShaper_8_pruned.safetensors'];
+const queuedWorkflows: Array<Record<string, any>> = [];
+let comfyHistory: Record<string, any> = {
+  p1: {
+    status: { completed: true, status_str: 'success' },
+    outputs: { 7: { images: [{ filename: 'perch_temp_00001_.png', subfolder: '', type: 'temp' }] } },
+  },
+};
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'perch-test-'));
 await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
@@ -59,6 +107,7 @@ const { createProxyServer } = await import('./proxy.js');
 const { serviceById } = await import('./services.js');
 const { mintToken, revokeToken, resetAuthFailures } = await import('./auth.js');
 const { throughput, reset: resetMetrics } = await import('./metrics.js');
+const { updateState } = await import('./state.js');
 
 const proxy = createProxyServer({ ...serviceById('chat'), upstream: `http://127.0.0.1:${upstreamPort}` });
 await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
@@ -383,19 +432,73 @@ test('a service refuses another service\'s endpoints', async () => {
   voice.close();
 });
 
-test('the image service exposes generation but not the rest of the A1111 API', async () => {
-  const image = createProxyServer({ ...serviceById('image'), upstream: `http://127.0.0.1:${upstreamPort}` });
-  await new Promise<void>((resolve) => image.listen(0, '127.0.0.1', resolve));
-  const port2 = (image.address() as { port: number }).port;
-  const hit = (p: string, m = 'POST'): Promise<Response> =>
-    fetch(`http://127.0.0.1:${port2}${p}`, { method: m, headers: { Authorization: `Bearer ${useToken}` } });
+// The translator that replaced the Stable Diffusion container. What matters
+// is that one OpenAI-shaped call becomes the three ComfyUI calls and comes
+// back as base64 — a client written against OpenAI's images API should not be
+// able to tell what is behind this.
+test('one OpenAI images call becomes a ComfyUI graph and a picture', async () => {
+  const video = createProxyServer({ ...serviceById('video'), upstream: `http://127.0.0.1:${upstreamPort}` });
+  await new Promise<void>((resolve) => video.listen(0, '127.0.0.1', resolve));
+  const port2 = (video.address() as { port: number }).port;
+  queuedWorkflows.length = 0;
 
-  assert.equal((await hit('/sdapi/v1/txt2img')).status, 200);
-  // These reconfigure the server or run code on it. Not exposed.
-  for (const p of ['/sdapi/v1/options', '/sdapi/v1/refresh-checkpoints', '/sdapi/v1/reload-checkpoint', '/docs']) {
-    assert.equal((await hit(p)).status, 404, `${p} must not be routable`);
-  }
-  image.close();
+  const res = await fetch(`http://127.0.0.1:${port2}/v1/images/generations`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${useToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: 'a heron on a post', size: '512x512', negative_prompt: 'blurry' }),
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json() as { created: number; data: Array<{ b64_json: string }> };
+  assert.equal(body.data.length, 1);
+  assert.equal(Buffer.from(body.data[0]!.b64_json, 'base64').toString(), 'PNGBYTES');
+  assert.ok(body.created > 0, 'the OpenAI shape carries a created timestamp');
+
+  // The graph that went upstream has to carry what the caller asked for, or
+  // the endpoint quietly generates something else.
+  const wf = queuedWorkflows.at(-1)!;
+  assert.equal(wf['1'].inputs.ckpt_name, 'DreamShaper_8_pruned.safetensors', 'the only installed checkpoint is the one loaded');
+  assert.equal(wf['2'].inputs.text, 'a heron on a post');
+  assert.equal(wf['3'].inputs.text, 'blurry');
+  assert.equal(wf['4'].inputs.width, 512);
+  assert.equal(wf['4'].inputs.height, 512);
+  video.close();
+});
+
+test('the images endpoint refuses what it cannot do rather than answering the wrong shape', async () => {
+  const video = createProxyServer({ ...serviceById('video'), upstream: `http://127.0.0.1:${upstreamPort}` });
+  await new Promise<void>((resolve) => video.listen(0, '127.0.0.1', resolve));
+  const port2 = (video.address() as { port: number }).port;
+  const post = (b: unknown): Promise<Response> => fetch(`http://127.0.0.1:${port2}/v1/images/generations`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${useToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(b),
+  });
+
+  assert.equal((await post({})).status, 400, 'a request with no prompt is not a request');
+  // A client reading `.url` must be told, not handed a body with no url in it.
+  const asUrl = await post({ prompt: 'x', response_format: 'url' });
+  assert.equal(asUrl.status, 400);
+  assert.match((await asUrl.json() as any).error.message, /b64_json/);
+  assert.equal((await post({ prompt: 'x', size: 'enormous' })).status, 400);
+
+  // A model that is not installed names the ones that are, because the caller
+  // cannot see the volume.
+  const missing = await post({ prompt: 'x', model: 'not-here' });
+  assert.equal(missing.status, 404);
+  assert.match((await missing.json() as any).error.message, /DreamShaper/);
+  video.close();
+});
+
+test('the video service lists its checkpoints in OpenAI’s shape, so a model can be named', async () => {
+  const video = createProxyServer({ ...serviceById('video'), upstream: `http://127.0.0.1:${upstreamPort}` });
+  await new Promise<void>((resolve) => video.listen(0, '127.0.0.1', resolve));
+  const port2 = (video.address() as { port: number }).port;
+  const res = await fetch(`http://127.0.0.1:${port2}/v1/models`, { headers: { Authorization: `Bearer ${useToken}` } });
+  assert.equal(res.status, 200);
+  const body = await res.json() as { object: string; data: Array<{ id: string }> };
+  assert.equal(body.object, 'list');
+  assert.deepEqual(body.data.map((m) => m.id), ['DreamShaper_8_pruned.safetensors']);
+  video.close();
 });
 
 // ComfyUI's API is small, and the dangerous part of it is not the generating.
@@ -440,3 +543,119 @@ test.after(() => {
   upstream.close();
   fs.rmSync(stateDir, { recursive: true, force: true });
 });
+
+
+// ── The per-service proxy ──────────────────────────────────────────────────
+//
+// Each service reaches its own upstream and may reach it its own way. The
+// failure being guarded against is silent: a request that ignores the proxy
+// still succeeds and still returns an answer, so nothing in the response says
+// it took a route the operator specifically said not to.
+
+// A stub SOCKS5 proxy that records what it was asked to connect to.
+const proxied: string[] = [];
+const socksStub = net.createServer((client) => {
+  let stage = 0;
+  client.on('data', (chunk: Buffer) => {
+    if (stage === 0) { client.write(Buffer.from([0x05, 0x00])); stage = 1; return; }
+    if (stage !== 1) return;
+    const atyp = chunk[3]!;
+    let host: string; let off: number;
+    if (atyp === 0x03) { const len = chunk[4]!; host = chunk.subarray(5, 5 + len).toString(); off = 5 + len; }
+    else { host = Array.from(chunk.subarray(4, 8)).join('.'); off = 8; }
+    const port = chunk.readUInt16BE(off);
+    proxied.push(`${host}:${port}`);
+    const up = net.connect(port, host === 'localhost' ? '127.0.0.1' : host, () => {
+      client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+      client.pipe(up); up.pipe(client);
+    });
+    up.on('error', () => client.end());
+    stage = 2;
+  });
+  client.on('error', () => {});
+});
+await new Promise<void>((r) => socksStub.listen(0, '127.0.0.1', () => r()));
+const socksStubPort = (socksStub.address() as net.AddressInfo).port;
+
+test('a service with no proxy set reaches its upstream directly', async () => {
+  resetAuthFailures();
+  proxied.length = 0;
+  updateState((st) => { st.settings.proxies.chat = ''; });
+  const res = await call('/api/tags', { headers: { Authorization: `Bearer ${useToken}` } });
+  assert.equal(res.status, 200);
+  assert.equal(proxied.length, 0, 'a request went through a proxy with none configured');
+});
+
+test('a service with a proxy set reaches its upstream through it', async () => {
+  resetAuthFailures();
+  proxied.length = 0;
+  updateState((st) => { st.settings.proxies.chat = `socks5h://127.0.0.1:${socksStubPort}`; });
+  try {
+    const res = await call('/api/tags', { headers: { Authorization: `Bearer ${useToken}` } });
+    assert.equal(res.status, 200);
+    assert.equal(proxied.length, 1, 'the request did not go through the configured proxy');
+    assert.match(proxied[0]!, new RegExp(`:${upstreamPort}$`));
+  } finally {
+    updateState((st) => { st.settings.proxies.chat = ''; });
+  }
+});
+
+test('the setting is read per request, so a change needs no restart', async () => {
+  // The proxy server was created before either of these values existed. A
+  // route resolved once at startup would have made changing it in the console
+  // a restart, which for this setting is the difference between a two-second
+  // correction and a service that is down until somebody notices.
+  resetAuthFailures();
+  proxied.length = 0;
+  updateState((st) => { st.settings.proxies.chat = `socks5h://127.0.0.1:${socksStubPort}`; });
+  await call('/api/tags', { headers: { Authorization: `Bearer ${useToken}` } });
+  assert.equal(proxied.length, 1);
+  updateState((st) => { st.settings.proxies.chat = ''; });
+  await call('/api/tags', { headers: { Authorization: `Bearer ${useToken}` } });
+  assert.equal(proxied.length, 1, 'the old route was still in use after the setting changed');
+});
+
+test('one service using a proxy does not put another service through it', async () => {
+  // The whole reason the field is per service: a chat model on a rented box
+  // and a whisper container one bridge away are not the same journey.
+  resetAuthFailures();
+  proxied.length = 0;
+  const voice = createProxyServer({ ...serviceById('voice'), upstream: `http://127.0.0.1:${upstreamPort}` });
+  await new Promise<void>((r) => voice.listen(0, '127.0.0.1', () => r()));
+  const vPort = (voice.address() as { port: number }).port;
+  updateState((st) => {
+    st.settings.proxies.chat = `socks5h://127.0.0.1:${socksStubPort}`;
+    st.settings.proxies.voice = '';
+  });
+  try {
+    await fetch(`http://127.0.0.1:${vPort}/`, { headers: { Authorization: `Bearer ${useToken}` } });
+    assert.equal(proxied.length, 0, 'dictation was routed through the chat service\'s proxy');
+    await call('/api/tags', { headers: { Authorization: `Bearer ${useToken}` } });
+    assert.equal(proxied.length, 1, 'chat did not use its own proxy');
+  } finally {
+    updateState((st) => { st.settings.proxies.chat = ''; });
+    voice.close();
+  }
+});
+
+test('a proxy that will not parse is refused, not quietly ignored', async () => {
+  // Falling back to a direct connection would send the traffic somewhere the
+  // operator specifically said not to, and say nothing about it. A 502 naming
+  // the setting is the only honest answer.
+  resetAuthFailures();
+  proxied.length = 0;
+  upstreamCalls.length = 0;
+  updateState((st) => { st.settings.proxies.chat = 'http://not-a-socks-proxy:8080'; });
+  try {
+    const res = await call('/api/tags', { headers: { Authorization: `Bearer ${useToken}` } });
+    assert.equal(res.status, 502);
+    const body = await res.json() as { error: string };
+    assert.match(body.error, /proxy setting is not usable/);
+    assert.equal(upstreamCalls.filter((c) => c.url === '/api/tags').length, 0,
+      'the request reached the upstream despite an unusable proxy');
+  } finally {
+    updateState((st) => { st.settings.proxies.chat = ''; });
+  }
+});
+
+test.after(() => socksStub.close());
