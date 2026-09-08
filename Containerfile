@@ -44,7 +44,10 @@ ENV PERCH_CLIENT_DIST=/app/client/dist \
 # uid 1000 matches the node user, and install.sh gives the state directory on
 # the host to the same id so the two can share it.
 USER node
-EXPOSE 8099 11434
+# Console, chat, and the four optional services — dictation, images, video,
+# audio — on the ports each of those is conventionally found on. Whether one
+# is listening depends on PERCH_SERVICES; EXPOSE only documents the set.
+EXPOSE 8099 11434 8080 7860 8188 8880
 # No HEALTHCHECK here: podman builds OCI images by default, which have no
 # field for one, and it would be silently dropped. It lives in compose.yml
 # instead, where it is actually run.

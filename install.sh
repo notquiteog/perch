@@ -254,10 +254,10 @@ PERCH_STATE_DIR="${PERCH_STATE_DIR:-/var/lib/perch}"
 # written, because the port check below reads them and runs first. Left until
 # then, the first switched-on optional service ended the install with
 # `!var: unbound variable`. These match the defaults in the compose overlays.
-PERCH_VOICE_PORT="${PERCH_VOICE_PORT:-11435}"
-PERCH_IMAGE_PORT="${PERCH_IMAGE_PORT:-11436}"
-PERCH_VIDEO_PORT="${PERCH_VIDEO_PORT:-11437}"
-PERCH_AUDIO_PORT="${PERCH_AUDIO_PORT:-11438}"
+PERCH_VOICE_PORT="${PERCH_VOICE_PORT:-8080}"
+PERCH_IMAGE_PORT="${PERCH_IMAGE_PORT:-7860}"
+PERCH_VIDEO_PORT="${PERCH_VIDEO_PORT:-8188}"
+PERCH_AUDIO_PORT="${PERCH_AUDIO_PORT:-8880}"
 ask PERCH_CONSOLE_PORT "Console port (on 127.0.0.1)" "${PERCH_CONSOLE_PORT:-8099}"
 ask PERCH_PROXY_PORT   "Model endpoint port (on 127.0.0.1)" "${PERCH_PROXY_PORT:-11434}"
 ask OLLAMA_NUM_PARALLEL "Requests answered at once" "${OLLAMA_NUM_PARALLEL:-$SLOTS}"

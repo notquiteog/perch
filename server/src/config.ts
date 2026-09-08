@@ -41,14 +41,19 @@ export const config = {
   // overlay is enabled. They get their own ports because a transcriber is a
   // different server from a language model — and because one allowlist per
   // API is the whole point.
-  voicePort: int('PERCH_VOICE_PORT', 11435),
-  imagePort: int('PERCH_IMAGE_PORT', 11436),
-  videoPort: int('PERCH_VIDEO_PORT', 11437),
-  audioPort: int('PERCH_AUDIO_PORT', 11438),
+  // Each takes the port its own backend is conventionally found on —
+  // whisper.cpp 8080, Stable Diffusion 7860, ComfyUI 8188, Kokoro 8880 — so a
+  // client already written against one of them needs no new number. These are
+  // perch's front doors, not the backends: the backend containers publish
+  // nothing and are reached over the compose network.
+  voicePort: int('PERCH_VOICE_PORT', 8080),
+  imagePort: int('PERCH_IMAGE_PORT', 7860),
+  videoPort: int('PERCH_VIDEO_PORT', 8188),
+  audioPort: int('PERCH_AUDIO_PORT', 8880),
 
   // The ports as published on the *host*, which are not always the ports perch
   // listens on inside the container. compose maps host:container, so a machine
-  // that already had something on 11435 gets its dictation endpoint published
+  // that already had something on 8080 gets its dictation endpoint published
   // somewhere else while the container carries on listening where it always
   // did.
   //
@@ -56,10 +61,10 @@ export const config = {
   // listen ports. They match by default, which is exactly why getting this
   // wrong would go unnoticed until somebody remapped a port.
   hostChatPort: int('PERCH_HOST_CHAT_PORT', int('PERCH_PROXY_PORT', 11434)),
-  hostVoicePort: int('PERCH_HOST_VOICE_PORT', int('PERCH_VOICE_PORT', 11435)),
-  hostImagePort: int('PERCH_HOST_IMAGE_PORT', int('PERCH_IMAGE_PORT', 11436)),
-  hostVideoPort: int('PERCH_HOST_VIDEO_PORT', int('PERCH_VIDEO_PORT', 11437)),
-  hostAudioPort: int('PERCH_HOST_AUDIO_PORT', int('PERCH_AUDIO_PORT', 11438)),
+  hostVoicePort: int('PERCH_HOST_VOICE_PORT', int('PERCH_VOICE_PORT', 8080)),
+  hostImagePort: int('PERCH_HOST_IMAGE_PORT', int('PERCH_IMAGE_PORT', 7860)),
+  hostVideoPort: int('PERCH_HOST_VIDEO_PORT', int('PERCH_VIDEO_PORT', 8188)),
+  hostAudioPort: int('PERCH_HOST_AUDIO_PORT', int('PERCH_AUDIO_PORT', 8880)),
   whisperUrl: env('PERCH_WHISPER_URL', 'http://whisper:8080').replace(/\/+$/, ''),
   sdUrl: env('PERCH_SD_URL', 'http://sd:7860').replace(/\/+$/, ''),
   comfyUrl: env('PERCH_COMFY_URL', 'http://comfy:8188').replace(/\/+$/, ''),

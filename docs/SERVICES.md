@@ -10,13 +10,21 @@ streaming pipe, the concurrency backstop, the activity ring — because the
 security properties should not vary by which model happens to be behind the
 socket.
 
-| Service | Port | Behind it | What it does | Tern uses it for |
+| Service | Port on this machine | Behind it | What it does | Tern uses it for |
 |---|---|---|---|---|
 | **Chat** | 11434 | Ollama | Text and embeddings | Drafting, replies, rewrites, subject lines, search |
-| **Dictation** | 11435 | whisper.cpp | Speech to text | The dictation key |
-| **Images** | 11436 | Stable Diffusion | Images from a prompt | Nothing — see below |
-| **Video** | 11437 | ComfyUI | Video, and the newer image and music models | Nothing |
-| **Audio** | 11438 | Kokoro | Text to speech | Nothing |
+| **Dictation** | 8080 | whisper.cpp | Speech to text | The dictation key |
+| **Images** | 7860 | Stable Diffusion | Images from a prompt | Nothing — see below |
+| **Video** | 8188 | ComfyUI | Video, and the newer image and music models | Nothing |
+| **Audio** | 8880 | Kokoro | Text to speech | Nothing |
+
+Each is the port that service is conventionally found on when it is run by
+hand, so a client already written against a local Ollama, whisper.cpp or
+ComfyUI needs no new number — it needs a token. What is listening there is
+perch rather than the backend: the backend containers publish nothing at all,
+and keep these same numbers on the compose network where only perch can reach
+them. If something on this machine already holds one, the installer publishes
+that service one port along and says so.
 
 Chat is always on. The other four are off unless you ask for them, because each
 is another claim on the same GPU.
@@ -36,15 +44,18 @@ carries every service instead:
 
 ```
 -R 10.89.0.1:11434:127.0.0.1:11434   # chat
--R 10.89.0.1:11435:127.0.0.1:11435   # dictation
--R 10.89.0.1:11436:127.0.0.1:11436   # images
--R 10.89.0.1:11437:127.0.0.1:11437   # video
--R 10.89.0.1:11438:127.0.0.1:11438   # audio
+-R 10.89.0.1:11435:127.0.0.1:8080    # dictation
+-R 10.89.0.1:11436:127.0.0.1:7860    # images
+-R 10.89.0.1:11437:127.0.0.1:8188    # video
+-R 10.89.0.1:11438:127.0.0.1:8880    # audio
 ```
 
-The far-side ports run consecutively from the chat port because every one of
-them must be named in that machine's `permitlisten`. A run of numbers is one
-thing to check; five arbitrary ones is five.
+The two sides are numbered independently, and the block above is the clearest
+statement of why. Here, each service sits where that service is normally
+found. On the far side they run consecutively from the chat port, because
+every one of them must be named in that machine's `permitlisten`: a run of
+numbers is one thing to check, and five scattered ones is five. Neither
+constraint has anything to say about the other.
 
 Each service's offset is its position in that fixed list, not its position in
 what you ticked — so switching video on later does not renumber the port

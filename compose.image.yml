@@ -39,9 +39,9 @@ services:
     ports:
       # Loopback only, like every other perch port: the tunnel picks it up from
       # there and it never exists on another interface.
-      - "127.0.0.1:${PERCH_IMAGE_PORT:-11436}:11436"
+      - "127.0.0.1:${PERCH_IMAGE_PORT:-7860}:7860"
     environment:
-      PERCH_HOST_IMAGE_PORT: ${PERCH_IMAGE_PORT:-11436}
+      PERCH_HOST_IMAGE_PORT: ${PERCH_IMAGE_PORT:-7860}
       PERCH_SD_URL: http://sd:7860
       # Passed through so the console can show the size this container was
       # given rather than guessing at the default.

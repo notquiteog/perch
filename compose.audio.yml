@@ -30,9 +30,9 @@ services:
     ports:
       # Loopback only, like every other perch port: the tunnel picks it up from
       # there and it never exists on another interface.
-      - "127.0.0.1:${PERCH_AUDIO_PORT:-11438}:11438"
+      - "127.0.0.1:${PERCH_AUDIO_PORT:-8880}:8880"
     environment:
-      PERCH_HOST_AUDIO_PORT: ${PERCH_AUDIO_PORT:-11438}
+      PERCH_HOST_AUDIO_PORT: ${PERCH_AUDIO_PORT:-8880}
       PERCH_TTS_URL: http://kokoro:8880
       # Passed through so the console can show the size this container was
       # given rather than guessing at the default.

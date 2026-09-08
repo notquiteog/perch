@@ -50,9 +50,9 @@ services:
     ports:
       # Loopback only, like every other perch port: the tunnel picks it up from
       # there and it never exists on another interface.
-      - "127.0.0.1:${PERCH_VIDEO_PORT:-11437}:11437"
+      - "127.0.0.1:${PERCH_VIDEO_PORT:-8188}:8188"
     environment:
-      PERCH_HOST_VIDEO_PORT: ${PERCH_VIDEO_PORT:-11437}
+      PERCH_HOST_VIDEO_PORT: ${PERCH_VIDEO_PORT:-8188}
       PERCH_COMFY_URL: http://comfy:8188
       # Passed through so the console can show the size this container was
       # given rather than guessing at the default.

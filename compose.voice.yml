@@ -61,9 +61,9 @@ services:
     ports:
       # Loopback only, like every other perch port: the tunnel picks it up from
       # there and it never exists on another interface.
-      - "127.0.0.1:${PERCH_VOICE_PORT:-11435}:11435"
+      - "127.0.0.1:${PERCH_VOICE_PORT:-8080}:8080"
     environment:
-      PERCH_HOST_VOICE_PORT: ${PERCH_VOICE_PORT:-11435}
+      PERCH_HOST_VOICE_PORT: ${PERCH_VOICE_PORT:-8080}
       PERCH_WHISPER_URL: http://whisper:8080
       # The same value the whisper container is started with, so the console
       # can say which speech model is in use rather than assuming the default.
