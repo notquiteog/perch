@@ -33,6 +33,13 @@ services:
       OLLAMA_MAX_QUEUE: ${OLLAMA_MAX_QUEUE:-32}
     volumes:
       - perch-models:/root/.ollama
+    # Empty means no limit, which is the right default: on a GPU box the
+    # weights are in VRAM, where a memory limit here does nothing, and on a
+    # CPU box a limit under the model's size turns a slow answer into a killed
+    # container. The console's System page is where this gets set, and it
+    # refuses a value below what the recommended model needs.
+    mem_limit: ${OLLAMA_MEM_LIMIT:-}
+    cpus: ${OLLAMA_CPUS:-0}
     healthcheck:
       test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
       interval: 30s
@@ -58,6 +65,13 @@ services:
       # .env; a bare compose.yml is chat and nothing else.
       PERCH_SERVICES: ${PERCH_SERVICES:-chat}
       PERCH_LOG_LEVEL: ${PERCH_LOG_LEVEL:-info}
+      # The container sizes, passed through so the console shows what each
+      # container was actually given rather than the default it would have
+      # had. The overlays pass their own; these two are always here.
+      PERCH_MEM_LIMIT: ${PERCH_MEM_LIMIT:-256m}
+      PERCH_CPUS: ${PERCH_CPUS:-0}
+      OLLAMA_MEM_LIMIT: ${OLLAMA_MEM_LIMIT:-}
+      OLLAMA_CPUS: ${OLLAMA_CPUS:-0}
     ports:
       # console
       - "127.0.0.1:${PERCH_CONSOLE_PORT:-8099}:8099"
@@ -77,6 +91,7 @@ services:
       retries: 3
       start_period: 15s
     mem_limit: ${PERCH_MEM_LIMIT:-256m}
+    cpus: ${PERCH_CPUS:-0}
 
 volumes:
   perch-models:

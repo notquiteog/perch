@@ -37,12 +37,14 @@ export const config = {
   proxyPort: int('PERCH_PROXY_PORT', 11434),
   proxyBind: env('PERCH_PROXY_BIND', '127.0.0.1'),
 
-  // The other two model servers, each optional and each off unless its
-  // compose overlay is enabled. They get their own ports because Tern treats
-  // a transcriber as a different server from the writing model — and because
-  // one allowlist per API is the whole point.
+  // The other model servers, each optional and each off unless its compose
+  // overlay is enabled. They get their own ports because a transcriber is a
+  // different server from a language model — and because one allowlist per
+  // API is the whole point.
   voicePort: int('PERCH_VOICE_PORT', 11435),
   imagePort: int('PERCH_IMAGE_PORT', 11436),
+  videoPort: int('PERCH_VIDEO_PORT', 11437),
+  audioPort: int('PERCH_AUDIO_PORT', 11438),
 
   // The ports as published on the *host*, which are not always the ports perch
   // listens on inside the container. compose maps host:container, so a machine
@@ -56,8 +58,12 @@ export const config = {
   hostChatPort: int('PERCH_HOST_CHAT_PORT', int('PERCH_PROXY_PORT', 11434)),
   hostVoicePort: int('PERCH_HOST_VOICE_PORT', int('PERCH_VOICE_PORT', 11435)),
   hostImagePort: int('PERCH_HOST_IMAGE_PORT', int('PERCH_IMAGE_PORT', 11436)),
+  hostVideoPort: int('PERCH_HOST_VIDEO_PORT', int('PERCH_VIDEO_PORT', 11437)),
+  hostAudioPort: int('PERCH_HOST_AUDIO_PORT', int('PERCH_AUDIO_PORT', 11438)),
   whisperUrl: env('PERCH_WHISPER_URL', 'http://whisper:8080').replace(/\/+$/, ''),
   sdUrl: env('PERCH_SD_URL', 'http://sd:7860').replace(/\/+$/, ''),
+  comfyUrl: env('PERCH_COMFY_URL', 'http://comfy:8188').replace(/\/+$/, ''),
+  ttsUrl: env('PERCH_TTS_URL', 'http://kokoro:8880').replace(/\/+$/, ''),
   /** Comma-separated: which services listen at all. chat is always on. */
   enabledServices: env('PERCH_SERVICES', 'chat'),
 

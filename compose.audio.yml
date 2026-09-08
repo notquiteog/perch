@@ -1,0 +1,42 @@
+# Optional overlay: audio generation — speech out, as dictation is speech in.
+#
+# Kokoro behind its FastAPI server, which speaks OpenAI's /v1/audio/speech
+# shape. That is deliberate and it is the same bet dictation makes: a client
+# already written against OpenAI's API needs an address and a key changed,
+# not an adapter written.
+#
+# What it costs. Kokoro is 82M parameters — the smallest model perch runs by
+# two orders of magnitude — and generates faster than real time on a handful
+# of CPU cores. On a box whose card is busy holding a language model, the CPU
+# is the right place for it, which is what KOKORO_IMAGE's `-cpu` variant is
+# for. The voices ship inside the image, so there is nothing to download and
+# nothing to choose: the console lists what the server reports.
+#
+# Music is not this container. ACE-Step is a diffusion graph, so it runs in
+# the video service's ComfyUI alongside the video models; the Models page says
+# so beside it.
+services:
+  kokoro:
+    # The GPU build. install.sh writes the `-cpu` one instead on a machine
+    # with no GPU, because the GPU image will not start without a CUDA device
+    # to find and the failure is a long way from its cause.
+    image: ${KOKORO_IMAGE:-ghcr.io/remsky/kokoro-fastapi-gpu:latest}
+    restart: unless-stopped
+    # Never published to the host, same as the others.
+    mem_limit: ${KOKORO_MEM_LIMIT:-4g}
+    cpus: ${KOKORO_CPUS:-0}
+
+  perch:
+    ports:
+      # Loopback only, like every other perch port: the tunnel picks it up from
+      # there and it never exists on another interface.
+      - "127.0.0.1:${PERCH_AUDIO_PORT:-11438}:11438"
+    environment:
+      PERCH_HOST_AUDIO_PORT: ${PERCH_AUDIO_PORT:-11438}
+      PERCH_TTS_URL: http://kokoro:8880
+      # Passed through so the console can show the size this container was
+      # given rather than guessing at the default.
+      KOKORO_MEM_LIMIT: ${KOKORO_MEM_LIMIT:-4g}
+      KOKORO_CPUS: ${KOKORO_CPUS:-0}
+    depends_on:
+      - kokoro

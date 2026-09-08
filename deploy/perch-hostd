@@ -68,8 +68,52 @@ valid_id() { [[ ${1-} =~ ^[a-z0-9][a-z0-9-]{0,35}$ ]]; }
 unit_for() { printf 'perch-tunnel-%s.service' "$1"; }
 
 compose() {
-  # Mirrors bin/perch so both take the same overlays into account.
-  ( cd "$PERCH_DIR" 2>/dev/null && podman-compose --env-file "$PERCH_DIR/.env" "$@" ) 2>&1
+  # Mirrors bin/perch so both take the same overlays into account — which
+  # means sourcing .env and exporting COMPOSE_FILE, not just passing
+  # --env-file.
+  #
+  # The two do different jobs and only one of them selects the overlays.
+  # --env-file supplies values for interpolation *inside* the compose files;
+  # the list of files itself comes from the COMPOSE_FILE variable in the
+  # environment. Without it the helper sees compose.yml and nothing else, so
+  # every optional service is "missing": restarting whisper answers
+  # "missing services [whisper]", `containers.stop` stops perch and ollama and
+  # silently leaves dictation running, and a container the console said it had
+  # restarted was never touched.
+  #
+  # And it runs the work as a transient systemd service rather than as a child
+  # of this one.
+  #
+  # A container inherits the execution context of whatever created it, and this
+  # unit is deliberately restricted — NoNewPrivileges, a private /home. Under
+  # that, creating a container gets as far as `capset: Operation not
+  # permitted`: the container is created and cannot be started, so it sits in
+  # Created while the console reports the restart it asked for as done. The
+  # same command from a terminal works, which is what makes it so confusing to
+  # diagnose — "it works when I do it by hand".
+  #
+  # A transient service is started by PID 1, not by this process, so it does
+  # not inherit any of that. `--scope` would not do: a scope is forked from the
+  # caller and keeps its no-new-privileges bit.
+  if have systemd-run; then
+    systemd-run --quiet --wait --collect --pipe --service-type=exec \
+      --working-directory="$PERCH_DIR" --unit="perch-compose-$$" \
+      /bin/bash -c '
+        set -a; [ -f ./.env ] && . ./.env; set +a
+        export COMPOSE_FILE="${COMPOSE_FILE:-compose.yml}"
+        exec podman-compose --env-file ./.env "$@"
+      ' _ "$@" 2>&1
+    return
+  fi
+  (
+    cd "$PERCH_DIR" 2>/dev/null || { echo "no install at $PERCH_DIR"; exit 1; }
+    if [ -f "$PERCH_DIR/.env" ]; then
+      # shellcheck disable=SC1091
+      set -a; . "$PERCH_DIR/.env"; set +a
+    fi
+    export COMPOSE_FILE="${COMPOSE_FILE:-compose.yml}"
+    podman-compose --env-file "$PERCH_DIR/.env" "$@"
+  ) 2>&1
 }
 
 # ---------- telemetry ----------
@@ -140,14 +184,55 @@ read_disk() {
     "$(jstr "$target")" "$(jnum "$size")" "$(jnum "$used")" "$(jnum "$avail")" "$(jnum "$pct")"
 }
 
+# The size each container was actually created with, which is a different
+# question from the size .env asks for: a limit that has been written but not
+# applied shows up here as the old one, and that difference is the whole
+# reason the console can say "restart to apply" rather than guessing.
+#
+# `podman inspect` is a good deal more expensive than `podman ps`, and this
+# loop runs every second, so the answer is cached — a resource limit only
+# changes when a container is recreated, and ten seconds late is not late.
+declare -A CT_MEM CT_CPU
+LIMITS_AT=0
+refresh_limits() {
+  local now; now=$(date +%s)
+  [ $(( now - LIMITS_AT )) -lt 10 ] && return 0
+  LIMITS_AT=$now
+  have podman || return 0
+  CT_MEM=(); CT_CPU=()
+  local names name mem nano
+  names=$(podman ps --all --format '{{.Names}}' 2>/dev/null | grep perch || true)
+  [ -z "$names" ] && return 0
+  while IFS='|' read -r name mem nano; do
+    [ -z "$name" ] && continue
+    name="${name#/}"
+    CT_MEM["$name"]="$mem"
+    CT_CPU["$name"]="$nano"
+  done < <(printf '%s\n' "$names" | xargs -r podman inspect \
+             --format '{{.Name}}|{{.HostConfig.Memory}}|{{.HostConfig.NanoCpus}}' 2>/dev/null)
+}
+
+# Nanocpus as a number of cores, or null for "no limit".
+cpu_field() {
+  local nano="${1:-0}"
+  case "$nano" in ''|0) printf 'null'; return ;; esac
+  [[ $nano =~ ^[0-9]+$ ]] || { printf 'null'; return; }
+  awk -v n="$nano" 'BEGIN{printf "%.2f", n/1000000000}'
+}
+
 read_containers() {
   have podman || { printf '[]'; return; }
-  local out="" first=1 name status started
+  refresh_limits
+  local out="" first=1 name status started mem
   while IFS='|' read -r name status started; do
     [ -z "$name" ] && continue
     [ $first -eq 0 ] && out+=","
     first=0
-    out+=$(printf '{"name":%s,"status":%s,"startedAt":%s}' "$(jstr "$name")" "$(jstr "$status")" "$(jstr "$started")")
+    mem="${CT_MEM[$name]:-0}"
+    [[ $mem =~ ^[0-9]+$ ]] || mem=0
+    out+=$(printf '{"name":%s,"status":%s,"startedAt":%s,"memLimitBytes":%s,"cpus":%s}' \
+      "$(jstr "$name")" "$(jstr "$status")" "$(jstr "$started")" \
+      "$([ "$mem" = 0 ] && printf 'null' || printf '%s' "$mem")" "$(cpu_field "${CT_CPU[$name]:-0}")")
   done < <(podman ps --all --filter "label=io.podman.compose.project=perch" \
              --format '{{.Names}}|{{.Status}}|{{.StartedAt}}' 2>/dev/null)
   # podman-compose has used more than one project label over the years; fall
@@ -163,7 +248,11 @@ read_containers() {
       case "$name" in *perch*) ;; *) continue ;; esac
       [ $first -eq 0 ] && out+=","
       first=0
-      out+=$(printf '{"name":%s,"status":%s,"startedAt":%s}' "$(jstr "$name")" "$(jstr "$status")" "$(jstr "$started")")
+      mem="${CT_MEM[$name]:-0}"
+      [[ $mem =~ ^[0-9]+$ ]] || mem=0
+      out+=$(printf '{"name":%s,"status":%s,"startedAt":%s,"memLimitBytes":%s,"cpus":%s}' \
+        "$(jstr "$name")" "$(jstr "$status")" "$(jstr "$started")" \
+        "$([ "$mem" = 0 ] && printf 'null' || printf '%s' "$mem")" "$(cpu_field "${CT_CPU[$name]:-0}")")
     done < <(podman ps --all --format '{{.Names}}|{{.Status}}|{{.StartedAt}}' 2>/dev/null)
   fi
   printf '[%s]' "$out"
@@ -226,7 +315,23 @@ run_action() {
     containers.restart)
       case "$arg" in
         ''|all)      compose restart ;;
+        # whisper is restarted after WHISPER_MODEL changes. `up -d` rather
+        # than `restart`, because a restart reuses the existing container with
+        # the environment it was created with — the new model would not be
+        # read until something else recreated it, which is a change that
+        # silently does nothing. The same is true of every optional service
+        # whose model or size is set in .env.
+        whisper|sd|comfy|kokoro) compose up -d --force-recreate "$arg" ;;
         perch|ollama) compose restart "$arg" ;;
+        *)           echo "unknown service: $arg"; return 2 ;;
+      esac ;;
+    # Resource limits are fixed when a container is created, so applying a new
+    # size is always a recreate — a restart would leave the value sitting in
+    # .env doing nothing, which is the worst way for a setting to fail.
+    containers.recreate)
+      case "$arg" in
+        perch|ollama|whisper|sd|comfy|kokoro) compose up -d --force-recreate "$arg" ;;
+        ''|all)      compose up -d --force-recreate ;;
         *)           echo "unknown service: $arg"; return 2 ;;
       esac ;;
     containers.pull)     compose pull ;;
@@ -247,10 +352,15 @@ run_action() {
     tunnel.remove)       do_tunnel_remove "$arg" ;;
     logs)
       case "$arg" in
-        perch|ollama)    compose logs --tail=200 "$arg" ;;
+        # whisper's log is where a first start's model download is visible;
+        # nothing else reports that progress at all. ComfyUI's is where a
+        # workflow that failed for want of a model file says so.
+        perch|ollama|whisper|sd|comfy|kokoro) compose logs --tail=200 "$arg" ;;
         *)               echo "unknown service: $arg"; return 2 ;;
       esac ;;
     env.set)             do_env_set "$arg" ;;
+    env.get)             do_env_get "$arg" ;;
+    whisper.model)       do_whisper_model ;;
     daemon.reload)       systemctl daemon-reload 2>&1 ;;
     *)
       echo "refused: $action is not an action perch-hostd performs"
@@ -441,10 +551,10 @@ do_tunnel_remove() {
   echo "removed $id from this machine"
 }
 
-# Ollama's tuning knobs, written into .env# Ollama's tuning knobs, written into .env so they survive a restart. Only
-# these keys, and only values of the shape each one takes — the file is read
-# by compose, so an unchecked value here would be an injection into the
-# container's environment.
+# Ollama's tuning knobs, the speech model and the container sizes, written
+# into .env so they survive a restart. Only these keys, and only values of the
+# shape each one takes — the file is read by compose, so an unchecked value
+# here would be an injection into the container's environment.
 do_env_set() {
   local key="${1%%=*}" value="${1#*=}"
   case "$key" in
@@ -456,8 +566,25 @@ do_env_set() {
       case "$value" in 0|1) ;; *) echo "bad value for $key"; return 2 ;; esac ;;
     OLLAMA_KEEP_ALIVE)
       [[ $value =~ ^-?[0-9]+[smh]?$ ]] || { echo "bad value for $key"; return 2; } ;;
-    OLLAMA_MEM_LIMIT|PERCH_MAX_CONCURRENT)
+    PERCH_MAX_CONCURRENT)
       [[ $value =~ ^[0-9]+[mg]?$ ]] || { echo "bad value for $key"; return 2; } ;;
+    # How big each container may be. A memory limit as compose writes it —
+    # 512m, 8g, or 0 for no limit — and a CPU limit in cores, which may have a
+    # fraction. Both go straight into a `podman create` argument, so the shape
+    # is checked here as well as in the console.
+    PERCH_MEM_LIMIT|OLLAMA_MEM_LIMIT|WHISPER_MEM_LIMIT|SD_MEM_LIMIT|COMFY_MEM_LIMIT|KOKORO_MEM_LIMIT)
+      [[ $value =~ ^[0-9]{1,6}[kmgKMG]?$ ]] || { echo "bad value for $key"; return 2; } ;;
+    PERCH_CPUS|OLLAMA_CPUS|WHISPER_CPUS|SD_CPUS|COMFY_CPUS|KOKORO_CPUS)
+      [[ $value =~ ^[0-9]{1,3}(\.[0-9]{1,2})?$ ]] || { echo "bad value for $key"; return 2; } ;;
+    # The speech model. A literal list rather than a pattern: the value
+    # becomes part of a filename inside the container's start command
+    # (ggml-$WHISPER_MODEL.bin), so anything not on this list has no business
+    # being written into the environment compose expands.
+    WHISPER_MODEL)
+      case "$value" in
+        tiny|tiny.en|base|base.en|small|small.en|medium|medium.en|large-v2|large-v3|large-v3-turbo) ;;
+        *) echo "bad value for $key"; return 2 ;;
+      esac ;;
     *) echo "refused: $key is not a settable key"; return 2 ;;
   esac
   local env_file="$PERCH_DIR/.env"
@@ -467,7 +594,46 @@ do_env_set() {
   else
     printf '%s=%s\n' "$key" "$value" >> "$env_file"
   fi
-  echo "set $key=$value (restart to apply)"
+  echo "set $key=$value (the container has to be recreated to pick it up)"
+}
+
+# Which weights the whisper container is actually running.
+#
+# Not the same question as "what does .env ask for": those differ whenever a
+# change has been written and not applied, which is the state a failed switch
+# leaves behind. The console cannot answer it alone — it has no view of the
+# container's command line, and whisper.cpp does not report its own model — so
+# without this the card has to guess, and guesses wrong in exactly the case
+# somebody is trying to diagnose.
+do_whisper_model() {
+  have podman || { echo "podman is not here"; return 1; }
+  local name cmd
+  name=$(podman ps --all --format '{{.Names}}' 2>/dev/null | grep -m1 -E '(^|[_-])whisper([_-]|$)') || true
+  [ -n "$name" ] || { echo ""; return 0; }
+  cmd=$(podman inspect "$name" --format '{{range .Config.Cmd}}{{.}} {{end}}' 2>/dev/null) || true
+  printf '%s\n' "$cmd" | grep -oE 'ggml-[A-Za-z0-9.-]+\.bin' | head -1 | sed -e 's/^ggml-//' -e 's/\.bin$//'
+}
+
+# Read one of the settable keys back.
+#
+# The console has no copy of .env and cannot read the host's filesystem. What
+# it has is the environment compose handed its own container when that
+# container was created — which is right until somebody changes a setting
+# without recreating perch as well, and then it is a confident lie: the speech
+# model is switched, whisper comes back on the new weights, and the card goes
+# on naming the old one.
+do_env_get() {
+  local key="${1%%=*}"
+  case "$key" in
+    OLLAMA_NUM_PARALLEL|OLLAMA_MAX_LOADED_MODELS|OLLAMA_MAX_QUEUE|OLLAMA_KV_CACHE_TYPE) ;;
+    OLLAMA_FLASH_ATTENTION|OLLAMA_KEEP_ALIVE|PERCH_MAX_CONCURRENT|WHISPER_MODEL) ;;
+    PERCH_MEM_LIMIT|OLLAMA_MEM_LIMIT|WHISPER_MEM_LIMIT|SD_MEM_LIMIT|COMFY_MEM_LIMIT|KOKORO_MEM_LIMIT) ;;
+    PERCH_CPUS|OLLAMA_CPUS|WHISPER_CPUS|SD_CPUS|COMFY_CPUS|KOKORO_CPUS) ;;
+    *) echo "refused: $key is not a readable key"; return 2 ;;
+  esac
+  [ -f "$PERCH_DIR/.env" ] || { echo "no .env at $PERCH_DIR"; return 1; }
+  # The last assignment wins, which is what a shell sourcing the file would do.
+  sed -n "s/^$key=//p" "$PERCH_DIR/.env" | tail -1
 }
 
 process_requests() {

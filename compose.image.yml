@@ -33,6 +33,7 @@ services:
       - perch-sd-outputs:/app/stable-diffusion-webui/outputs:z
     # Never published to the host, same as the others.
     mem_limit: ${SD_MEM_LIMIT:-12g}
+    cpus: ${SD_CPUS:-0}
 
   perch:
     ports:
@@ -42,6 +43,10 @@ services:
     environment:
       PERCH_HOST_IMAGE_PORT: ${PERCH_IMAGE_PORT:-11436}
       PERCH_SD_URL: http://sd:7860
+      # Passed through so the console can show the size this container was
+      # given rather than guessing at the default.
+      SD_MEM_LIMIT: ${SD_MEM_LIMIT:-12g}
+      SD_CPUS: ${SD_CPUS:-0}
     depends_on:
       - sd
 

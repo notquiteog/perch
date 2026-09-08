@@ -1,4 +1,55 @@
-import { useEffect, useId, useState, type ReactNode } from 'react';
+import { Component, useEffect, useId, useState, type ErrorInfo, type ReactNode } from 'react';
+
+/**
+ * A render error should cost you one panel, not the console.
+ *
+ * React unmounts the whole tree on an uncaught error, so a single bad field
+ * turns every page black — no message, no navigation, nothing to act on. On
+ * the machine's own control panel that is the worst possible failure: it looks
+ * exactly like the console being down, and the first thing anybody does about
+ * a console that is down is restart the container it was going to tell them
+ * about.
+ *
+ * It happened for real: /api/overview stopped sending a field the Status page
+ * still read, and only when no model was resident — so the console went black
+ * on the exact machines with nothing loaded, which is the state you open it to
+ * investigate.
+ */
+export class Boundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    // The console has no error reporting and should not grow any, but the
+    // browser's own console is where somebody debugging this will look.
+    console.error('perch console: a panel failed to render', error, info.componentStack);
+  }
+
+  render(): ReactNode {
+    const { error } = this.state;
+    if (!error) return this.props.children;
+    return (
+      <div className="card">
+        <h2>This page did not render</h2>
+        <p className="sub">
+          Something on it asked for data that was not there. The rest of the console still works, and
+          perch itself is unaffected — this is the page, not the machine.
+        </p>
+        <pre className="code" style={{ whiteSpace: 'pre-wrap' }}>{error.message}</pre>
+        <div className="row" style={{ marginTop: 12 }}>
+          <button className="sm" onClick={() => this.setState({ error: null })}>Try again</button>
+          <button className="sm ghost" onClick={() => window.location.reload()}>Reload</button>
+        </div>
+      </div>
+    );
+  }
+}
 
 export function Card({ title, sub, right, children }: {
   title?: string; sub?: string; right?: ReactNode; children: ReactNode;
@@ -146,7 +197,7 @@ export function CodeBlock({ text, wrap }: { text: string; wrap?: boolean }) {
   );
 }
 
-export function Notice({ tone = 'info', children }: { tone?: 'info' | 'good' | 'bad'; children: ReactNode }) {
+export function Notice({ tone = 'info', children }: { tone?: 'info' | 'good' | 'bad' | 'warn'; children: ReactNode }) {
   return <div className={`notice ${tone}`}>{children}</div>;
 }
 

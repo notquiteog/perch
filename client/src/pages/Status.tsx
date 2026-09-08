@@ -151,8 +151,9 @@ export default function Status({ go }: { go: (page: string) => void }) {
         >
           {loaded.length === 0 ? (
             <Empty>
-              Nothing loaded. The first request from Tern will load{' '}
-              <span className="mono">{overview.tern.model}</span> and take a few seconds longer than the rest.
+              Nothing is resident. The next request loads whichever model it asks for, which takes a few
+              seconds longer than the rest; on this machine the sizing suggests{' '}
+              <span className="mono">{overview.sizing.recommended.name}</span>.
             </Empty>
           ) : (
             <table>

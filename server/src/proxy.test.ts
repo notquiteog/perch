@@ -257,6 +257,43 @@ test('the image service exposes generation but not the rest of the A1111 API', a
   image.close();
 });
 
+// ComfyUI's API is small, and the dangerous part of it is not the generating.
+// The manager extension installs code from the internet, and the userdata
+// routes read and write arbitrary files under its home directory — either
+// would turn a leaked token into arbitrary code on the GPU box.
+test('the video service queues work but cannot install or read files', async () => {
+  const video = createProxyServer({ ...serviceById('video'), upstream: `http://127.0.0.1:${upstreamPort}` });
+  await new Promise<void>((resolve) => video.listen(0, '127.0.0.1', resolve));
+  const vPort = (video.address() as { port: number }).port;
+  const hit = (p: string, m = 'POST'): Promise<Response> =>
+    fetch(`http://127.0.0.1:${vPort}${p}`, { method: m, headers: { Authorization: `Bearer ${useToken}` } });
+
+  assert.equal((await hit('/prompt')).status, 200, 'queueing a workflow is the point');
+  assert.equal((await hit('/history', 'GET')).status, 200);
+  assert.equal((await hit('/view', 'GET')).status, 200, 'a result has to be readable');
+  for (const p of ['/api/manager/queue/install', '/userdata/x', '/api/userdata/x', '/system_stats/../etc']) {
+    assert.equal((await hit(p)).status, 404, `${p} must not be routable`);
+    assert.equal((await hit(p, 'GET')).status, 404, `${p} must not be routable`);
+  }
+  video.close();
+});
+
+test('the audio service speaks only the OpenAI speech shape', async () => {
+  const audio = createProxyServer({ ...serviceById('audio'), upstream: `http://127.0.0.1:${upstreamPort}` });
+  await new Promise<void>((resolve) => audio.listen(0, '127.0.0.1', resolve));
+  const aPort = (audio.address() as { port: number }).port;
+  const hit = (p: string, m = 'POST'): Promise<Response> =>
+    fetch(`http://127.0.0.1:${aPort}${p}`, { method: m, headers: { Authorization: `Bearer ${useToken}` } });
+
+  assert.equal((await hit('/v1/audio/speech')).status, 200);
+  assert.equal((await hit('/v1/audio/voices', 'GET')).status, 200);
+  // Speech out, not speech in, and nothing that writes to the server.
+  for (const p of ['/v1/audio/transcriptions', '/v1/models/download', '/docs']) {
+    assert.equal((await hit(p)).status, 404, `${p} must not be routable`);
+  }
+  audio.close();
+});
+
 test.after(() => {
   proxy.close();
   upstream.close();

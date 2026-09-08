@@ -69,18 +69,94 @@ export async function showModel(name: string): Promise<Record<string, unknown>> 
   return json<Record<string, unknown>>('/api/show', { method: 'POST', body: JSON.stringify({ model: name }) });
 }
 
-export async function deleteModel(name: string): Promise<void> {
-  const res = await call('/api/delete', { method: 'DELETE', body: JSON.stringify({ model: name }) }, 60_000);
-  if (!res.ok) throw new Error(`could not delete ${name}: ${(await res.text()).slice(0, 200)}`);
+/**
+ * Delete a model, and then check that it is gone.
+ *
+ * A 200 from /api/delete was the whole story before, and it is not enough. A
+ * name that differs from the stored one by `:latest` deletes nothing while
+ * answering 200, and the console then showed the model as removed until the
+ * next poll put it back — which looks exactly like the delete button not
+ * working. The answer is the model list, not the status code.
+ */
+export async function deleteModel(name: string): Promise<ModelInfo[]> {
+  // Dropped from memory first, or a resident copy keeps holding the VRAM the
+  // deletion was meant to give back — and, on this machine, the KV cache with
+  // somebody's email in it.
+  await unloadModel(name).catch(() => {});
+  const res = await call('/api/delete', {
+    method: 'DELETE',
+    // `model` is what current Ollama reads, `name` what it read before 0.4.
+    // Sending both costs nothing and covers a delete that matched nothing.
+    body: JSON.stringify({ model: name, name }),
+  }, 60_000);
+  if (!res.ok) {
+    const detail = (await res.text()).slice(0, 200);
+    if (res.status === 404) throw new Error(`ollama has no model called ${name}`);
+    throw new Error(`could not delete ${name}: ${detail}`);
+  }
+  const after = await listModels().catch(() => null);
+  if (after && after.some((m) => sameModel(m.name, name))) {
+    throw new Error(`${name} is still on this machine after the delete was accepted`);
+  }
+  return after ?? [];
+}
+
+/**
+ * Ollama tags an untagged name with `:latest` when it stores or loads it, so
+ * the name somebody types and the name in /api/tags often differ by that
+ * suffix alone.
+ */
+export function sameModel(a: string, b: string): boolean {
+  const norm = (s: string): string => { const t = String(s ?? '').trim(); return t.includes(':') ? t : `${t}:latest`; };
+  return Boolean(String(a ?? '').trim()) && norm(a) === norm(b);
+}
+
+/**
+ * Everything the Models page draws, asked of Ollama every time.
+ *
+ * The page used to catch a failure into an empty array, so an Ollama that was
+ * down and an Ollama with nothing downloaded produced the same screen: "no
+ * models". On a machine whose entire job is holding models, that is the one
+ * thing the page must not say by accident.
+ */
+export async function liveModels(): Promise<{ ok: boolean; error?: string; version?: string; installed: ModelInfo[]; loaded: LoadedModel[]; at: string }> {
+  const at = new Date().toISOString();
+  const h = await health();
+  if (!h.ok) return { ok: false, error: h.error, installed: [], loaded: [], at };
+  try {
+    const [installed, loaded] = await Promise.all([listModels(), loadedModels().catch(() => [])]);
+    return { ok: true, version: h.version, installed, loaded, at };
+  } catch (e) {
+    return { ok: false, version: h.version, error: (e as Error).message, installed: [], loaded: [], at };
+  }
+}
+
+/**
+ * keep_alive, in the shape Ollama will actually take.
+ *
+ * It accepts either a duration *string* with a unit — "30s", "10m" — or a
+ * *number* of seconds, where a negative number means "never unload". The two
+ * are not interchangeable: a bare "-1" as a string goes to Go's
+ * ParseDuration, which rejects it with `time: missing unit in duration "-1"`,
+ * and it does so before the model is even looked up.
+ *
+ * That matters because -1 is exactly what the Settings page offers for
+ * keeping a model resident. Anybody who took that advice found the Load
+ * button failing with a Go error about duration units, on a setting the
+ * console itself recommended.
+ */
+export function keepAliveValue(raw: string | null | undefined): string | number {
+  const value = (raw ?? '').trim() || '10m';
+  return /^-?\d+$/.test(value) ? Number(value) : value;
 }
 
 /**
  * Put a model in memory without asking it for anything, so the first real
- * request from Tern does not pay the load time. An empty prompt with a
- * keep_alive is Ollama's own idiom for this.
+ * request does not pay the load time. An empty prompt with a keep_alive is
+ * Ollama's own idiom for this.
  */
 export async function loadModel(name: string): Promise<void> {
-  const keepAlive = loadState().settings.keepAlive || '10m';
+  const keepAlive = keepAliveValue(loadState().settings.keepAlive);
   // An empty prompt with a keep_alive is Ollama's idiom for "load this and
   // hold it". It does not work for embedding models: they have no generate
   // endpoint and answer "does not support generate", which surfaced as an
@@ -157,14 +233,20 @@ export async function pullModel(
       buffer = buffer.slice(nl + 1);
       nl = buffer.indexOf('\n');
       if (!line) continue;
+      // A line that will not parse is noise and is skipped; a line that
+      // parses and carries an error is the download failing and has to come
+      // out of here rather than being logged as a curiosity. Parsing first
+      // and throwing second keeps those two apart, which a single try/catch
+      // around both could not.
+      let parsed: (PullProgress & { error?: string }) | null = null;
       try {
-        const parsed = JSON.parse(line) as PullProgress & { error?: string };
-        if (parsed.error) throw new Error(parsed.error);
-        onProgress(parsed);
-      } catch (e) {
-        if ((e as Error).message && !(e instanceof SyntaxError)) throw e;
+        parsed = JSON.parse(line) as PullProgress & { error?: string };
+      } catch {
         log.debug('unparsed pull line', line.slice(0, 120));
       }
+      if (!parsed) continue;
+      if (parsed.error) throw new Error(parsed.error);
+      onProgress(parsed);
     }
   }
 }

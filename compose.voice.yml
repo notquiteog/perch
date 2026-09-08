@@ -55,6 +55,7 @@ services:
     # Never published to the host. perch reaches it over the compose network,
     # and nothing outside this box can send it audio.
     mem_limit: ${WHISPER_MEM_LIMIT:-2g}
+    cpus: ${WHISPER_CPUS:-0}
 
   perch:
     ports:
@@ -64,6 +65,15 @@ services:
     environment:
       PERCH_HOST_VOICE_PORT: ${PERCH_VOICE_PORT:-11435}
       PERCH_WHISPER_URL: http://whisper:8080
+      # The same value the whisper container is started with, so the console
+      # can say which speech model is in use rather than assuming the default.
+      # Without this the Dictation card has to guess, and guesses "base" —
+      # which is wrong on every machine that changed it.
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      # Passed through so the console can show the size this container was
+      # given rather than guessing at the default.
+      WHISPER_MEM_LIMIT: ${WHISPER_MEM_LIMIT:-2g}
+      WHISPER_CPUS: ${WHISPER_CPUS:-0}
     depends_on:
       - whisper
 

@@ -14,7 +14,8 @@ export interface HostStatus {
   cpu: { load1: number | null; load5: number | null; load15: number | null; cores: number | null };
   gpus: Gpu[];
   disk: { path: string; totalKb: number | null; usedKb: number | null; availableKb: number | null; usedPct: number | null };
-  containers: Array<{ name: string; status: string; startedAt: string }>;
+  /** With the resource limits each container was created with, where podman could say. */
+  containers: Array<{ name: string; status: string; startedAt: string; memLimitBytes?: number | null; cpus?: number | null }>;
   boot: { unit: string; active: string; enabled: string; since: string };
   tunnel: { unit: string; active: string; enabled: string; since: string };
 }
@@ -29,6 +30,69 @@ export interface ModelChoice {
   params: string; contextTokens: number | null; current?: boolean; note: string;
 }
 export interface Sizing { basis: 'vram' | 'ram'; usableBytes: number; recommended: ModelChoice; fits: ModelChoice[]; numCtx: number }
+/** A download, as the server sees it. It is a job there, not this request. */
+export interface PullView {
+  name: string;
+  state: 'running' | 'done' | 'error' | 'cancelled';
+  status: string;
+  completed: number;
+  total: number;
+  /** Whole percent, or null while nothing has been sized yet. */
+  pct: number | null;
+  bytesPerSec: number | null;
+  etaSeconds: number | null;
+  startedAt: number;
+  endedAt: number | null;
+  error?: string;
+}
+
+export interface SpeechModel { name: string; sizeBytes: number; needsBytes: number; note: string }
+
+export type MediaFamily = 'image' | 'video' | 'audio';
+export interface MediaFile { url: string; dest: string; bytes: number }
+export interface MediaModel {
+  id: string; name: string; family: MediaFamily; service: ServiceId;
+  params: string; sizeBytes: number; needsBytes: number;
+  bundled?: boolean; files: MediaFile[]; note: string;
+}
+/** What one generation backend says about itself, and what it can see. */
+export interface MediaServiceStatus {
+  id: ServiceId; enabled: boolean; url: string;
+  ok: boolean; starting: boolean; error?: string;
+  installed: string[]; at: string;
+}
+export interface MediaOverview {
+  models: MediaModel[];
+  services: MediaServiceStatus[];
+  volumes: Partial<Record<ServiceId, { volume: string; subdir: string }>>;
+  at: string;
+}
+
+/** One container, and how big it is allowed to be. */
+export interface ContainerSize {
+  id: string; label: string; service: ServiceId | null; enabled: boolean;
+  memKey: string; cpuKey: string; defaultMem: string; floorBytes: number; note: string;
+  /** What .env asks for, as compose passed it through. */
+  configuredMem: string | null; configuredCpus: string | null;
+  /** Whether perch was told the configured value at all, or is showing the default. */
+  known: boolean;
+  /** What the running container was actually created with. */
+  effectiveMemBytes: number | null; effectiveCpus: number | null;
+  running: boolean; status: string | null;
+}
+
+export interface VoiceStatus {
+  enabled: boolean; url: string;
+  /** What .env asks for next time the container is created. */
+  model: string; modelKnown: boolean;
+  /** What it is actually running, from the host helper; null when unknown. */
+  running: string | null;
+  /** A model is set that the running container does not have. */
+  pending: boolean;
+  ok: boolean; error?: string; starting: boolean;
+  catalog: SpeechModel[]; at: string;
+}
+
 export interface Throughput { current: number; last: number; average: number; ttftMs: number | null; generations: number; totalTokens: number }
 
 export interface ConnectionStatus {
@@ -36,18 +100,26 @@ export interface ConnectionStatus {
   active: string; enabled: string; since: string; retired: boolean;
 }
 
-/** One SSH connection to one machine running Tern. */
+export type ServiceId = 'chat' | 'voice' | 'image' | 'video' | 'audio';
+
+/** One endpoint perch fronts: its port, its allowlist and what it costs. */
 export interface ServiceInfo {
-  id: 'chat' | 'voice' | 'image';
+  id: ServiceId;
   label: string; blurb: string;
   port: number; enabled: boolean;
-  overlay: string | null; ternField: string | null;
+  overlay: string | null; ternField: string | null; speaks: string;
   vramHintBytes: number;
   routes: Array<{ method: string; path: string; scope: string }>;
 }
 
 export interface Forward { id: string; localPort: number; remotePort: number; label: string }
-export interface TernUrl { id: string; label: string; url: string; literal: string; ternField: string | null }
+export interface TernUrl {
+  id: string; label: string; url: string; literal: string;
+  /** Where it goes in Tern, for the services Tern has a setting for. */
+  ternField: string | null;
+  /** The API shape behind the address, for anything else pointing at it. */
+  speaks: string;
+}
 
 export interface Connection {
   id: string; name: string;
@@ -74,7 +146,6 @@ export interface Overview {
   sizing: Sizing;
   connections: Array<Connection & { status: ConnectionStatus; ternBaseUrl: string }>;
   endpointUp: boolean;
-  tern: { model: string };
   settings: { allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean };
   tokens: number;
   activity: { total: number; errors: number; lastAt: string | null };
@@ -97,6 +168,9 @@ export interface TokenRecord {
   scopes: Array<'use' | 'manage'>;
   createdAt: string; lastUsedAt: string | null; lastUsedIp: string | null; revokedAt: string | null;
 }
+
+/** The compose services perch runs, which are what a restart or a log names. */
+export type ContainerName = 'perch' | 'ollama' | 'whisper' | 'sd' | 'comfy' | 'kokoro';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -126,11 +200,29 @@ export const api = {
   overview: () => request<Overview>('/api/overview'),
 
   models: () => request<{
-    installed: ModelInfo[]; loaded: LoadedModel[];
+    ok: boolean; error?: string; at: string;
+    installed: ModelInfo[]; loaded: LoadedModel[]; pulls: PullView[];
     catalog: ModelChoice[]; embedCatalog: ModelChoice[]; uncensoredCatalog: ModelChoice[];
     sizing: Sizing; totalBytes: number; totalHuman: string;
   }>('/api/models'),
-  deleteModel: (name: string) => request<{ ok: true }>('/api/models/delete', { method: 'POST', body: JSON.stringify({ name }) }),
+  deleteModel: (name: string) => request<{ ok: true; deleted: string; installed: ModelInfo[]; loaded: LoadedModel[] }>('/api/models/delete', { method: 'POST', body: JSON.stringify({ name }) }),
+  cancelPull: (name: string) => request<{ cancelled: boolean }>('/api/models/cancel', { method: 'POST', body: JSON.stringify({ name }) }),
+
+  voice: () => request<VoiceStatus>('/api/voice'),
+
+  media: () => request<MediaOverview>('/api/media'),
+
+  containers: () => request<{ containers: ContainerSize[]; hostAvailable: boolean; totalMemBytes: number }>('/api/containers'),
+  setContainerSize: (id: string, body: { mem?: string; cpus?: string; apply?: boolean }) =>
+    request<{
+      ok: boolean;
+      set: Array<{ key: string; ok: boolean; output: string }>;
+      applied: { ok: boolean; output: string } | null;
+      containers: ContainerSize[];
+    }>(`/api/containers/${id}/size`, { method: 'PUT', body: JSON.stringify(body) }),
+  setSpeechModel: (model: string) => request<{ ok: boolean; changed: boolean; set?: { ok: boolean; output: string }; applied?: { ok: boolean; output: string } | null; status?: VoiceStatus }>(
+    '/api/voice/model', { method: 'PUT', body: JSON.stringify({ model }) },
+  ),
   loadModel: (name: string) => request<{ ok: true }>('/api/models/load', { method: 'POST', body: JSON.stringify({ name }) }),
   unloadModel: (name: string) => request<{ ok: true }>('/api/models/unload', { method: 'POST', body: JSON.stringify({ name }) }),
 
@@ -157,10 +249,10 @@ export const api = {
   }>(`/api/connections/${id}`, { method: 'DELETE' }),
   forgetConnection: (id: string) => request<{ ok: true }>(`/api/connections/${id}/forget`, { method: 'POST' }),
 
-  containerAction: (action: 'start' | 'stop' | 'restart' | 'pull', service?: 'perch' | 'ollama') =>
+  containerAction: (action: 'start' | 'stop' | 'restart' | 'pull', service?: ContainerName) =>
     request<{ ok: boolean; output: string }>(`/api/containers/${action}`, { method: 'POST', body: JSON.stringify({ service }) }),
   boot: (state: 'enable' | 'disable') => request<{ ok: boolean; output: string }>(`/api/boot/${state}`, { method: 'POST' }),
-  logs: (service: 'perch' | 'ollama' | 'tunnel') => request<{ ok: boolean; output: string }>(`/api/logs/${service}`),
+  logs: (service: ContainerName | 'tunnel') => request<{ ok: boolean; output: string }>(`/api/logs/${service}`),
 
   settings: () => request<{
     settings: { allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean };
@@ -179,21 +271,30 @@ export const api = {
   }>(`/api/activity?limit=${limit}`),
 };
 
-/** A download, as a stream of progress events rather than one long wait. */
+/**
+ * Watch a download.
+ *
+ * What arrives is the server's whole view of the job — summed across layers,
+ * with a rate and an estimate — rather than the raw line Ollama last emitted.
+ * Closing this stream does not stop the download: it is a job on the server,
+ * and the models poll picks it back up. Only `api.cancelPull` stops one.
+ */
 export function pullModel(
   name: string,
-  onProgress: (p: { status: string; total?: number; completed?: number }) => void,
+  onProgress: (p: PullView) => void,
   onDone: (error?: string) => void,
 ): () => void {
   const source = new EventSource(`/api/models/pull?name=${encodeURIComponent(name)}`);
-  source.addEventListener('progress', (e) => onProgress(JSON.parse((e as MessageEvent).data)));
-  source.addEventListener('done', () => { source.close(); onDone(); });
-  source.addEventListener('failed', (e) => {
-    source.close();
-    onDone((JSON.parse((e as MessageEvent).data) as { error: string }).error);
-  });
-  source.onerror = () => { source.close(); onDone('the connection to perch dropped'); };
-  return () => source.close();
+  let settled = false;
+  const finish = (error?: string): void => { if (settled) return; settled = true; source.close(); onDone(error); };
+  source.addEventListener('progress', (e) => onProgress(JSON.parse((e as MessageEvent).data) as PullView));
+  source.addEventListener('done', () => finish());
+  source.addEventListener('failed', (e) => finish((JSON.parse((e as MessageEvent).data) as { error: string }).error));
+  // EventSource reconnects by itself on a dropped connection, which for a
+  // GET that starts work would silently start it again. Closing on the first
+  // error is what stops that; the download itself is unaffected either way.
+  source.onerror = () => finish('the connection to the console dropped — the download is still running');
+  return () => { settled = true; source.close(); };
 }
 
 export function human(bytes: number | null | undefined): string {

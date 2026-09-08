@@ -43,7 +43,13 @@ export interface HostStatus {
   cpu: { load1: number | null; load5: number | null; load15: number | null; cores: number | null };
   gpus: Gpu[];
   disk: { path: string; totalKb: number | null; usedKb: number | null; availableKb: number | null; usedPct: number | null };
-  containers: Array<{ name: string; status: string; startedAt: string }>;
+  /**
+   * What podman reports, with the resource limits each container was created
+   * with. The limits are the answer to "did the size I set actually take?" —
+   * a value in .env that has not been applied yet shows up here as the old
+   * one. Null where the helper predates them or podman could not be asked.
+   */
+  containers: Array<{ name: string; status: string; startedAt: string; memLimitBytes?: number | null; cpus?: number | null }>;
   boot: UnitState;
   /** One entry per perch-tunnel-*.service the helper can see. */
   tunnels: UnitState[];
@@ -67,10 +73,19 @@ export function readHostStatus(): { status: HostStatus | null; present: boolean;
 
 export type HostAction =
   | 'containers.start' | 'containers.stop' | 'containers.restart' | 'containers.pull'
+  // Recreate, not restart: resource limits are fixed when a container is
+  // created, so a restart would leave a changed limit sitting in .env doing
+  // nothing.
+  | 'containers.recreate'
   | 'boot.enable' | 'boot.disable'
   | 'tunnel.start' | 'tunnel.stop' | 'tunnel.restart' | 'tunnel.enable' | 'tunnel.disable'
   | 'tunnel.logs' | 'tunnel.keygen' | 'tunnel.configure' | 'tunnel.remove'
-  | 'logs' | 'env.set' | 'daemon.reload';
+  // env.get reads a setting back from .env. The console cannot see that file
+  // — it only has the environment its own container was created with, which
+  // goes stale as soon as a setting changes without perch being recreated.
+  // whisper.model reports what the speech container is actually started with,
+  // which nothing inside a container can see.
+  | 'logs' | 'env.set' | 'env.get' | 'whisper.model' | 'daemon.reload';
 
 export interface HostResult { ok: boolean; code: number; output: string }
 

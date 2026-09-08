@@ -1,0 +1,65 @@
+# Optional overlay: video generation.
+#
+# ComfyUI, which is a different shape from the other backends here. It does not
+# take a prompt and return a picture — it takes a *workflow*, a graph of nodes
+# naming the model files it wants, and returns whatever the graph produced. So
+# there is no single "video model" setting the way there is for whisper: what
+# runs is decided by whoever queues the job, from whatever weights are in the
+# volume.
+#
+# That is also why this container earns its keep beyond video. The same graph
+# runner is what runs FLUX for images and ACE-Step for music, neither of which
+# Stable Diffusion's web UI can load — so enabling this adds three families of
+# model rather than one, and the console's Models page says which container
+# each of its entries needs.
+#
+# What it costs, and it is the most expensive thing perch runs. A 5B video
+# model with its text encoder is around 14 GB on the card while it works, and
+# the 14B ones want a card to themselves. Decoding a clip happens in system
+# memory, which is why COMFY_MEM_LIMIT defaults high: 24 GB is not what it
+# uses, it is the ceiling below which a long render is killed rather than
+# slowed. Sizes → the console's System page.
+#
+# The image is community-maintained; upstream publishes no container. It keeps
+# everything under /root — ComfyUI itself, custom nodes, models and outputs —
+# and copies its bundled ComfyUI in on first start without overwriting what is
+# already there, which is what makes it safe to fetch models into the volume
+# before the container has ever run. Pin a digest in COMFY_IMAGE if that
+# matters to you; `:cpu` and `:rocm` tags exist for machines without an NVIDIA
+# card, though video generation on a CPU is measured in hours.
+services:
+  comfy:
+    image: ${COMFY_IMAGE:-docker.io/yanwk/comfyui-boot:cu126-slim}
+    restart: unless-stopped
+    environment:
+      # Appended to `main.py --listen --port 8188`. --disable-auto-launch
+      # stops it trying to open a browser on a headless box.
+      CLI_ARGS: ${COMFY_CLI_ARGS:---disable-auto-launch}
+    volumes:
+      # One volume for the whole of /root, because that is where this image
+      # puts ComfyUI, its models, its outputs and anything you install into
+      # it. `./bin/perch fetch` writes into ComfyUI/models inside here.
+      - perch-comfy:/root:z
+    # Never published to the host: perch reaches it over the compose network,
+    # and ComfyUI has no authentication of its own — anything that could reach
+    # its port could queue work and read every file it has produced.
+    mem_limit: ${COMFY_MEM_LIMIT:-24g}
+    cpus: ${COMFY_CPUS:-0}
+
+  perch:
+    ports:
+      # Loopback only, like every other perch port: the tunnel picks it up from
+      # there and it never exists on another interface.
+      - "127.0.0.1:${PERCH_VIDEO_PORT:-11437}:11437"
+    environment:
+      PERCH_HOST_VIDEO_PORT: ${PERCH_VIDEO_PORT:-11437}
+      PERCH_COMFY_URL: http://comfy:8188
+      # Passed through so the console can show the size this container was
+      # given rather than guessing at the default.
+      COMFY_MEM_LIMIT: ${COMFY_MEM_LIMIT:-24g}
+      COMFY_CPUS: ${COMFY_CPUS:-0}
+    depends_on:
+      - comfy
+
+volumes:
+  perch-comfy:

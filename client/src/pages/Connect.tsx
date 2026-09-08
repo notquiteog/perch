@@ -7,6 +7,22 @@ import { Card, CodeBlock, Copy, Empty, Notice, Spinner, Tag } from '../component
  * far side, its own key and its own systemd unit, so removing one leaves the
  * others untouched.
  */
+/**
+ * The services a connection can carry, in the order the tunnel numbers them.
+ *
+ * The offset is a service's position in this list rather than its position in
+ * what was ticked, so switching video on later does not renumber the port
+ * dictation is already using on the far side. It also means the far-side range
+ * is decided by the *last* service ticked, not by how many were.
+ */
+const SERVICE_ORDER: Array<[string, string]> = [
+  ['chat', 'Chat'], ['voice', 'Dictation'], ['image', 'Images'], ['video', 'Video'], ['audio', 'Audio'],
+];
+
+function portSpan(services: string[]): number {
+  return Math.max(0, ...services.map((id) => SERVICE_ORDER.findIndex(([x]) => x === id)));
+}
+
 export default function Connect() {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [endpointUp, setEndpointUp] = useState(false);
@@ -17,12 +33,17 @@ export default function Connect() {
   const [message, setMessage] = useState<{ tone: 'good' | 'bad' | 'info'; text: string } | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [form, setForm] = useState({ name: '', host: '', sshPort: 22, user: 'perch', remotePort: 11434, torProxy: '', services: ['chat'] as string[] });
+  // What this machine actually runs. A connection can only carry a service
+  // that has an endpoint here, and offering one that does not would hand
+  // somebody a port on the far side with nothing behind it.
+  const [available, setAvailable] = useState<string[] | null>(null);
 
   const refresh = useCallback(async () => {
-    const [c, tk] = await Promise.all([api.connections(), api.tokens()]);
+    const [c, tk, st] = await Promise.all([api.connections(), api.tokens(), api.settings()]);
     setConnections(c.connections);
     setEndpointUp(c.endpointUp);
     setTokens(tk.tokens.filter((t) => !t.revokedAt));
+    setAvailable(st.services.filter((svc) => svc.enabled).map((svc) => svc.id));
     setLoading(false);
   }, []);
 
@@ -117,13 +138,15 @@ export default function Connect() {
           <div className="field" style={{ maxWidth: 700, marginTop: 4 }}>
             <label>What this connection carries</label>
             <div className="row">
-              {[['chat', 'Chat'], ['voice', 'Dictation'], ['image', 'Images']].map(([id, label]) => (
-                <label key={id} className="row" style={{ gap: 6, fontSize: 12.5, color: 'var(--ink-dim)' }}>
+              {SERVICE_ORDER.map(([id, label]) => {
+                const here = available === null || available.includes(id!);
+                return (
+                <label key={id} className="row" style={{ gap: 6, fontSize: 12.5, color: here ? 'var(--ink-dim)' : 'var(--ink-faint)' }}>
                   <input
                     type="checkbox"
                     style={{ width: 'auto' }}
                     checked={form.services.includes(id!)}
-                    disabled={id === 'chat'}
+                    disabled={id === 'chat' || !here}
                     onChange={(e) => setForm({
                       ...form,
                       services: e.target.checked
@@ -131,13 +154,14 @@ export default function Connect() {
                         : form.services.filter((x) => x !== id),
                     })}
                   />
-                  {label}{id === 'chat' && ' (always)'}
+                  {label}{id === 'chat' && ' (always)'}{!here && ' — off here'}
                 </label>
-              ))}
+                );
+              })}
             </div>
             <span className="hint">
               One SSH session carries all of them, on consecutive ports from the one above —
-              so {form.remotePort}{form.services.length > 1 ? ` to ${form.remotePort + form.services.length - 1}` : ''} on
+              so {form.remotePort}{portSpan(form.services) > 0 ? ` to ${form.remotePort + portSpan(form.services)}` : ''} on
               the far side. Only services enabled on this machine can be carried.
             </span>
           </div>
@@ -165,6 +189,7 @@ export default function Connect() {
           onToggle={() => setOpen(open === c.id ? null : c.id)}
           onRun={run}
           setMessage={setMessage}
+          available={available}
         />
       ))}
 
@@ -200,17 +225,22 @@ export default function Connect() {
   );
 }
 
-function ConnectionCard({ c, open, busy, onToggle, onRun, setMessage }: {
+function ConnectionCard({ c, open, busy, onToggle, onRun, setMessage, available }: {
   c: Connection;
   open: boolean;
   busy: string | null;
   onToggle: () => void;
   onRun: (label: string, fn: () => Promise<unknown>, ok?: string) => Promise<void>;
   setMessage: (m: { tone: 'good' | 'bad' | 'info'; text: string } | null) => void;
+  /** Services switched on for this machine, or null while that is unknown. */
+  available: string[] | null;
 }) {
   const [paste, setPaste] = useState('');
   const [newToken, setNewToken] = useState<string | null>(null);
-  const [edit, setEdit] = useState({ host: c.host, sshPort: c.sshPort, user: c.user, remotePort: c.remotePort, torProxy: c.torProxy });
+  const [edit, setEdit] = useState({
+    host: c.host, sshPort: c.sshPort, user: c.user, remotePort: c.remotePort,
+    torProxy: c.torProxy, services: c.services ?? ['chat'],
+  });
 
   const running = c.status.active === 'active';
   const paired = c.status.configured;
@@ -251,8 +281,16 @@ function ConnectionCard({ c, open, busy, onToggle, onRun, setMessage }: {
             <div key={u.id} style={{ marginBottom: 10 }}>
               <p className="sub" style={{ marginBottom: 5 }}>
                 <strong>{u.label}</strong>
-                {u.ternField ? <> — {u.ternField}</> : <> — nothing in Tern uses this one</>}
+                {/* What it speaks, always — an address alone does not tell
+                    anybody what to send it, and only two of these have a
+                    field in Tern to be dropped into. */}
+                {u.speaks && <> — speaks {u.speaks}</>}
               </p>
+              {u.ternField && (
+                <p className="hint" style={{ margin: '0 0 5px' }}>
+                  In Tern: <span className="mono">{u.ternField}</span>
+                </p>
+              )}
               <CodeBlock text={u.url} />
             </div>
           ))}
@@ -272,6 +310,12 @@ function ConnectionCard({ c, open, busy, onToggle, onRun, setMessage }: {
                 </button>
               </div>
             )}
+            <span className="hint" style={{ marginTop: 6 }}>
+              One key opens every address above: perch checks the same tokens on all of them, and a
+              token&rsquo;s scopes — use, and whether it may download or delete models — are properties
+              of the key rather than of the service. If you want a service reachable only by a
+              particular caller, give it its own connection rather than its own key.
+            </span>
           </div>
         </div>
       )}
@@ -382,6 +426,44 @@ function ConnectionCard({ c, open, busy, onToggle, onRun, setMessage }: {
               <div className="field">
                 <label>Port there</label>
                 <input type="number" value={edit.remotePort} onChange={(e) => setEdit({ ...edit, remotePort: Number(e.target.value) })} />
+              </div>
+              {/* Which services this connection carries, changeable after the
+                  fact. It was only offered at creation before, so a
+                  connection made before dictation existed could never gain
+                  it: the endpoint ran here, the far side had no port for it,
+                  and nothing in the console said why. Saving re-renders the
+                  unit and restarts a running tunnel, so the new port is
+                  carried straight away. */}
+              <div className="field" style={{ gridColumn: 'span 3' }}>
+                <label>What this connection carries</label>
+                <div className="row" style={{ flexWrap: 'wrap' }}>
+                  {SERVICE_ORDER.map(([id, label]) => {
+                    const here = available === null || available.includes(id);
+                    return (
+                      <label key={id} className="row" style={{ gap: 6, fontSize: 12.5, color: here ? 'var(--ink-dim)' : 'var(--ink-faint)' }}>
+                        <input
+                          type="checkbox"
+                          style={{ width: 'auto' }}
+                          checked={edit.services.includes(id)}
+                          disabled={id === 'chat' || !here}
+                          onChange={(e) => setEdit({
+                            ...edit,
+                            services: e.target.checked
+                              ? [...edit.services, id]
+                              : edit.services.filter((x) => x !== id),
+                          })}
+                        />
+                        {label}{id === 'chat' && ' (always)'}{!here && ' — off here'}
+                      </label>
+                    );
+                  })}
+                </div>
+                <span className="hint">
+                  One SSH session carries all of them, on {c.remotePort}
+                  {portSpan(edit.services) > 0 ? ` to ${c.remotePort + portSpan(edit.services)}` : ''} over there.
+                  Adding one means the far side must permit the new port too — the setup command below
+                  is regenerated with it.
+                </span>
               </div>
               <div className="field" style={{ gridColumn: 'span 2' }}>
                 <label>SOCKS proxy</label>

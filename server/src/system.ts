@@ -1,5 +1,5 @@
-// Sizing: what this machine can actually run, and what it should run for
-// writing email.
+// Sizing: what this machine can actually run, and which language model it
+// should run.
 //
 // The numbers below are the memory a model needs to be useful, not the size
 // of its download. Weights are only part of it: every concurrent request
@@ -23,7 +23,7 @@ export interface ModelChoice {
    * Part of the current generation, and so what the recommendation reaches
    * for first. Without this the sizing picks whatever is largest, and a
    * previous-generation model one notch bigger wins over a newer one that
-   * would write better — which is how a catalogue quietly goes stale while
+   * would do better — which is how a catalogue quietly goes stale while
    * still looking maintained.
    */
   current?: boolean;
@@ -64,11 +64,11 @@ export const MODELS: ModelChoice[] = [
   },
   {
     name: 'qwen3.5:4b', current: true, sizeBytes: 3.39e9, needsBytes: need(3.39), params: '4B', contextTokens: 262144,
-    note: 'The smallest that writes a whole email without wandering. Comfortable on a 6–8 GB card.',
+    note: 'The smallest that writes a whole message or summary without wandering off. Comfortable on a 6–8 GB card.',
   },
   {
     name: 'qwen3.5:9b', current: true, sizeBytes: 6.59e9, needsBytes: need(6.59), params: '9B', contextTokens: 262144,
-    note: 'The sensible floor for drafts you would send after a glance rather than a rewrite. Its 262k context means a whole thread fits without being trimmed, which matters more for email than another couple of billion parameters.',
+    note: 'The sensible floor for work you would use after a glance rather than a rewrite. Its 262k context means a long document or thread fits without being trimmed, which is worth more than another couple of billion parameters for anything that reads before it writes.',
   },
   {
     name: 'gemma4:e2b', sizeBytes: 7.16e9, needsBytes: need(7.16), params: '2B effective', contextTokens: null,
@@ -108,15 +108,15 @@ export const MODELS: ModelChoice[] = [
 // the weights, so the model does not decline. Local drafting is where that
 // earns its place — a stock model refusing to help with a firm complaint, a
 // debt letter or a frank performance review is a common and genuinely
-// annoying failure, and the refusal protects nobody when the mail is yours and
+// annoying failure, and the refusal protects nobody when the work is yours and
 // the machine is yours.
 //
 // Two things worth knowing. Ablation is not free: it can soften
 // instruction-following and make a model slightly likelier to invent detail,
-// so compare against the stock model on your own mail rather than assuming an
-// upgrade. And if Tern is set to send responder mail with no human in the
-// loop, the model's own refusals were the last thing between an odd prompt and
-// an odd sent email — worth keeping that on the review queue at first.
+// so compare against the stock model on your own work rather than assuming an
+// upgrade. And anywhere the output goes out without a person reading it first,
+// the model's own refusals were the last thing between an odd prompt and an odd
+// sent message — worth keeping a human in that loop at first.
 //
 // Never auto-recommended: these are listed, sized and installable, and picking
 // one is a decision rather than a default.
@@ -154,15 +154,15 @@ export const UNCENSORED_MODELS: ModelChoice[] = [
 export const EMBED_MODELS: ModelChoice[] = [
   {
     name: 'all-minilm', sizeBytes: 0.05e9, needsBytes: 0.3e9, params: '23M', contextTokens: 512,
-    note: 'Tern\u2019s default for meaning search. Tiny, and loads beside the writing model without competing for room.',
+    note: 'The usual default, and Tern\u2019s. Tiny, and loads beside a language model without competing for room.',
   },
   {
     name: 'nomic-embed-text', sizeBytes: 0.27e9, needsBytes: 0.6e9, params: '137M', contextTokens: 8192,
-    note: 'Better search quality and a much longer input window, so a whole message embeds as one vector.',
+    note: 'Better search quality and a much longer input window, so a whole message or page embeds as one vector.',
   },
   {
     name: 'embeddinggemma', sizeBytes: 0.62e9, needsBytes: 1.1e9, params: '300M', contextTokens: 2048,
-    note: 'Larger again. Worth it only if you search a big mailbox and find the others imprecise.',
+    note: 'Larger again. Worth it only if you search a large collection and find the others imprecise.',
   },
 ];
 

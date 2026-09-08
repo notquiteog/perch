@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from './api';
 import { useLive } from './components/live';
-import { Card, Notice, Spinner } from './components/ui';
+import { Boundary, Card, Notice, Spinner } from './components/ui';
 import Status from './pages/Status';
 import Models from './pages/Models';
 import Connect from './pages/Connect';
@@ -152,12 +152,16 @@ export default function App() {
             no longer depends on that.
           </Notice>
         )}
-        {page === 'status' && <Status go={go} />}
-        {page === 'models' && <Models />}
-        {page === 'connect' && <Connect />}
-        {page === 'system' && <System />}
-        {page === 'activity' && <Activity />}
-        {page === 'settings' && <Settings />}
+        {/* Keyed on the page, so leaving a broken one and coming back gives it
+            a fresh attempt rather than a boundary that stays tripped. */}
+        <Boundary key={page}>
+          {page === 'status' && <Status go={go} />}
+          {page === 'models' && <Models />}
+          {page === 'connect' && <Connect />}
+          {page === 'system' && <System />}
+          {page === 'activity' && <Activity />}
+          {page === 'settings' && <Settings />}
+        </Boundary>
       </main>
     </div>
   );

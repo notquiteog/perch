@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, relative, type Overview } from '../api';
 import { Card, Notice, Spinner, Tag, Toggle } from '../components/ui';
+import ContainerSizes from './ContainerSizes';
 
 // Ollama reads these when it starts, so changing one writes .env and takes
 // effect on the next restart. Each is worth a sentence: they are the knobs
@@ -77,7 +78,7 @@ export default function System() {
     <>
       <div className="page-head">
         <h1>System</h1>
-        <p>The containers, whether they come back after a reboot, and the settings Ollama reads when it starts.</p>
+        <p>The containers, how big each of them may be, whether they come back after a reboot, and the settings Ollama reads when it starts.</p>
       </div>
 
       {message && <Notice tone={message.tone}><span style={{ whiteSpace: 'pre-wrap' }}>{message.text}</span></Notice>}
@@ -90,7 +91,7 @@ export default function System() {
         </Notice>
       )}
 
-      <Card title="Containers" sub="perch and Ollama, run by podman.">
+      <Card title="Containers" sub="Everything perch runs, by podman: the console, Ollama, and whichever optional services are switched on.">
         {containers.length === 0 ? (
           <p className="sub">Nothing reported. Either they are not running, or the helper cannot see them.</p>
         ) : (
@@ -136,6 +137,8 @@ export default function System() {
         </p>
       </Card>
 
+      <ContainerSizes hostUp={hostUp} />
+
       <Card title="At boot">
         <Toggle
           checked={bootOn}
@@ -178,7 +181,7 @@ export default function System() {
 
       <Card title="Logs">
         <div className="row">
-          {(['perch', 'ollama', 'tunnel'] as const).map((s) => (
+          {(['perch', 'ollama', 'whisper', 'sd', 'comfy', 'kokoro', 'tunnel'] as const).map((s) => (
             <button key={s} className="sm" disabled={!hostUp || busy !== null}
               onClick={() => void (async () => {
                 setBusy(s);

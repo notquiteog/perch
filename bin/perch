@@ -4,8 +4,10 @@
 #   ./bin/perch status               a summary of everything, in one screen
 #   ./bin/perch token [name]         mint an API token for Tern
 #   ./bin/perch console-password     set (or clear) the console password
-#   ./bin/perch pull-model <name>    download a model
+#   ./bin/perch pull-model <name>    download a language model
+#   ./bin/perch fetch <model>        download an image, video or audio model
 #   ./bin/perch models               what is installed and what is loaded
+#   ./bin/perch refresh              recreate containers whose image has changed
 #   ./bin/perch connections          list them, with state
 #   ./bin/perch tunnel <start|stop|restart|status|logs|enable|disable> <id>
 #   ./bin/perch boot <on|off>        start perch when this machine boots
@@ -18,7 +20,21 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 [ -f .env ] || { echo "No .env yet; run sudo ./install.sh first." >&2; exit 1; }
 # .env is root-only (mode 600), so become root before reading it.
-if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null; then exec sudo -E "$0" "$@"; fi
+# Become root, but not with the invoking user's home.
+#
+# `sudo -E` alone preserves HOME, and podman reads ~/.config/containers/storage.conf
+# to decide which storage it addresses. On a machine where the user has one —
+# common, and the default on some desktops — root's podman then operates on
+# that user's *rootless* store instead of the root store the installer built
+# the containers in. Nothing errors: `up` cheerfully builds a second, parallel
+# stack, `logs` and `status` report on containers that are not the ones
+# serving, and the two sets fight over the same ports.
+#
+# -E is kept, because PERCH_* overrides passed on the command line should
+# survive. HOME and the XDG variables that redirect container storage do not.
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null; then
+  exec sudo -E env -u XDG_RUNTIME_DIR -u XDG_DATA_HOME -u XDG_CONFIG_HOME HOME=/root "$0" "$@"
+fi
 # shellcheck disable=SC1091
 set -a; . ./.env; set +a
 export COMPOSE_FILE="${COMPOSE_FILE:-compose.yml}"
@@ -26,6 +42,37 @@ export COMPOSE_FILE="${COMPOSE_FILE:-compose.yml}"
 if command -v podman-compose >/dev/null 2>&1; then COMPOSE_CMD="podman-compose"
 else COMPOSE_CMD="podman compose"; fi
 compose() { $COMPOSE_CMD --env-file "$ROOT/.env" "$@"; }
+
+# Which services are running an image that is no longer what their tag points
+# at — the question `compose up -d` does not ask.
+#
+# podman-compose decides whether to recreate a container from a hash of the
+# service's *configuration*: its image name, environment, ports. A rebuilt or
+# re-pulled image under the same tag changes none of those, so build-then-up
+# leaves the old container running and reports success. That is the worst
+# possible outcome of an update, because every line of output says it worked.
+#
+# `.Image` is the tag the container was created from and `.ImageID` is what it
+# is actually running; if the tag now resolves to something else, the container
+# is behind.
+stale_services() {
+  local name svc ref running latest out=""
+  # Names from `ps`, everything else from `inspect`. `podman ps --format` will
+  # take a template that indexes .Labels and then quietly produce empty fields
+  # for it — which here would mean reporting every container as current, the
+  # exact failure this function exists to prevent.
+  while read -r name; do
+    [ -n "$name" ] || continue
+    IFS='|' read -r svc ref running <<<"$(podman inspect "$name" \
+      --format '{{index .Config.Labels "io.podman.compose.service"}}|{{.ImageName}}|{{.Image}}' 2>/dev/null)"
+    [ -n "$svc" ] && [ -n "$ref" ] && [ -n "$running" ] || continue
+    latest=$(podman image inspect "$ref" --format '{{.Id}}' 2>/dev/null || echo "$running")
+    [ "$latest" = "$running" ] && continue
+    out="$out $svc"
+  done < <(podman ps -a --filter "label=io.podman.compose.project=$(basename "$ROOT")" \
+             --format '{{.Names}}' 2>/dev/null)
+  printf '%s' "$out"
+}
 
 CONSOLE="http://127.0.0.1:${PERCH_CONSOLE_PORT:-8099}"
 ENDPOINT="http://127.0.0.1:${PERCH_PROXY_PORT:-11434}"
@@ -83,11 +130,125 @@ case "$cmd" in
     [ $# -ge 1 ] || { bad "which model? e.g. ./bin/perch pull-model qwen3.5:9b"; exit 1; }
     compose exec -T ollama ollama pull "$1" ;;
 
+  # Recreate whatever is behind its image, and nothing else. Safe to run at any
+  # time: with everything current it stops one command short of touching a
+  # single container.
+  refresh)
+    stale="$(stale_services)"
+    if [ -z "$stale" ]; then
+      ok "every container is running its current image"
+      exit 0
+    fi
+    note "a newer image is on disk for:$stale"
+    # shellcheck disable=SC2086
+    compose up -d --force-recreate $stale || true
+    # Asked again rather than assumed. A stop that is refused — by a stuck
+    # container, or by a security policy that will not let this process signal
+    # it — leaves podman-compose creating a replacement that cannot bind the
+    # port, and the old one still serving. Reporting success there is how an
+    # update silently does nothing.
+    still="$(stale_services)"
+    if [ -n "$still" ]; then
+      bad "still running the old image:$still"
+      note "podman could not replace the container. Check what is holding it:"
+      note "  podman ps -a --filter name=perch"
+      note "  journalctl -k -n 20   # a denied signal shows up here"
+      exit 1
+    fi
+    ok "recreated:$stale" ;;
+
   models)
     head_ "Installed"
     compose exec -T ollama ollama list
     head_ "In memory"
     compose exec -T ollama ollama ps ;;
+
+  # Image, video and audio models, which are files rather than tags.
+  #
+  # Ollama fetches its own; these backends do not. They read a directory when
+  # they start and have no API for putting anything in it, so somebody has to
+  # write the file — and it cannot be the perch container, which deliberately
+  # has no access to podman or to another container's storage.
+  #
+  # The catalogue comes from the console rather than living here as well. Two
+  # lists of URLs would disagree the first time one of them was edited, and the
+  # one that was wrong would be the one that downloads seventeen gigabytes.
+  fetch)
+    [ $# -ge 1 ] || {
+      bad "which model? The console's Models page lists them, or:"
+      curl -fsS --max-time 10 "$CONSOLE/api/media" 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for m in d["models"]:
+    if m.get("bundled"): continue
+    print("    %-18s %-22s %5.1f GB  %s" % (m["id"], m["name"], m["sizeBytes"]/1e9, m["family"]))'
+      exit 2
+    }
+    model="$1"
+    spec=$(curl -fsS --max-time 15 "$CONSOLE/api/media/model?id=$model" 2>/dev/null) || {
+      bad "the console did not answer for '$model'"
+      note "either it is not running (./bin/perch up), there is no such model"
+      note "(./bin/perch fetch with no arguments lists them), or a console password is"
+      note "set — the console API needs a session, which this script has no way to hold."
+      note "In that case the Models page shows each file's address and where it goes."
+      exit 1
+    }
+    # The volume, then everything that has to go in it.
+    #
+    # Parsed properly rather than with the sed helpers above, because this
+    # decides where several gigabytes are written. An empty name would reach
+    # `podman volume inspect` as no argument at all, which inspects *every*
+    # volume and answers with whichever comes first — a plausible path, into
+    # the wrong container's storage.
+    store=$(printf '%s' "$spec" | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+print("%s\t%s" % (d.get("volume", ""), d.get("subdir", "")))')
+    IFS=$'\t' read -r vol sub <<<"$store"
+    [ -n "$vol" ] || { bad "the console did not say which volume '$model' belongs in"; exit 1; }
+    # podman-compose prefixes volume names with the project, and the project is
+    # the directory this is installed in, so both shapes are tried.
+    mount=""
+    for candidate in "$(basename "$ROOT")_$vol" "perch_$vol" "$vol"; do
+      mount=$(podman volume inspect "$candidate" --format '{{.Mountpoint}}' 2>/dev/null) && [ -n "$mount" ] && break
+      mount=""
+    done
+    if [ -z "$mount" ]; then
+      bad "no podman volume for $vol yet"
+      note "it is created the first time that service starts: ./bin/perch up"
+      exit 1
+    fi
+    dest_root="$mount${sub:+/$sub}"
+    # Fed by process substitution rather than a pipe, so a failed download can
+    # stop the script: the loop body of a pipeline runs in a subshell, where
+    # exiting would only end the subshell and let the success message print.
+    while IFS=$'\t' read -r url dest bytes; do
+        target="$dest_root/$dest"
+        mkdir -p "$(dirname "$target")"
+        if [ -f "$target" ]; then
+          have=$(stat -c %s "$target" 2>/dev/null || echo 0)
+          if [ "$have" -ge "$bytes" ]; then ok "$(basename "$dest") is already here"; continue; fi
+          note "$(basename "$dest") is incomplete, resuming"
+        fi
+        printf '  %sfetching%s %s (%s GB)\n' "$D" "$N" "$dest" "$(awk -v b="$bytes" 'BEGIN{printf "%.1f", b/1e9}')"
+        # --continue-at resumes a partial file, so an interrupted 17 GB
+        # download is not started again from nothing.
+        if curl -fL --continue-at - --progress-bar -o "$target" "$url"; then
+          ok "$dest"
+        else
+          bad "$dest failed — run this again to resume"
+          exit 1
+        fi
+      done < <(printf '%s' "$spec" | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+for f in d["model"]["files"]:
+    print("%s\t%s\t%d" % (f["url"], f["dest"], f["bytes"]))')
+    # The file has to be readable by the container, which runs as its own user.
+    chmod -R a+rX "$dest_root" 2>/dev/null || true
+    ok "done. The service picks up a new file when it is recreated:"
+    note "./bin/perch compose up -d --force-recreate" ;;
 
   connections)
     printf '\n%s%-20s %-10s %-10s %s%s\n' "$B" "CONNECTION" "TUNNEL" "AT BOOT" "UNIT" "$N"
@@ -174,6 +335,23 @@ case "$cmd" in
     fail=0
     head_ "The things that usually go wrong"
 
+    # Which podman this is talking to, before anything that depends on the
+    # answer. A root podman that picked up a storage.conf from a user's home
+    # addresses that user's rootless store — where the containers the
+    # installer created are not. Every check below would then be reporting on
+    # containers that are not the ones serving, and every fix would be applied
+    # to the wrong copy.
+    graph=$(podman info --format '{{.Store.GraphRoot}}' 2>/dev/null || echo "")
+    if [ -n "$graph" ] && [ "$graph" != "/var/lib/containers/storage" ]; then
+      bad "this podman is using $graph, not root's /var/lib/containers/storage"
+      note "a storage.conf under someone's home has been picked up, so the containers"
+      note "the installer created are invisible from here — and a second, parallel set"
+      note "can be built without either being obviously wrong. Check HOME and XDG_*."
+      fail=1
+    else
+      ok "podman is using root's own storage"
+    fi
+
     if curl -fsS --max-time 3 "$ENDPOINT/healthz" >/dev/null 2>&1; then ok "the model endpoint is listening"
     else bad "the model endpoint is not listening — the containers may be down (./bin/perch up)"; fail=1; fi
 
@@ -255,5 +433,8 @@ case "$cmd" in
   update)  exec "$ROOT/update.sh" ;;
 
   help|--help|-h|*)
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+    # The header comment, however long it grows: printed until the first line
+    # that is not a comment, rather than up to a line number that goes stale
+    # the next time a command is added.
+    awk 'NR>1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "$0" ;;
 esac

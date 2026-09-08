@@ -260,6 +260,10 @@ pre.code.wrap { white-space: pre-wrap; word-break: break-all; }
 .notice.info { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); color: var(--ink); }
 .notice.bad { background: color-mix(in srgb, var(--bad) 10%, transparent); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); color: var(--ink); }
 .notice.good { background: color-mix(in srgb, var(--good) 10%, transparent); border-color: color-mix(in srgb, var(--good) 35%, var(--line)); color: var(--ink); }
+/* Not an error and not just information: a change that has been accepted and
+   has not taken effect yet, which needs more weight than a note and less than
+   a failure. */
+.notice.warn { background: color-mix(in srgb, var(--warn) 10%, transparent); border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); color: var(--ink); }
 
 .steps { counter-reset: step; list-style: none; padding: 0; margin: 0; }
 .steps > li { counter-increment: step; position: relative; padding: 0 0 20px 34px; border-left: 1px solid var(--line); margin-left: 11px; }

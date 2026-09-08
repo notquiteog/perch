@@ -13,10 +13,14 @@ import {
 } from './auth.js';
 import { loadState, updateState } from './state.js';
 import * as ollama from './ollama.js';
+import { cancelPull, listPulls, startPull, watchPull } from './pulls.js';
+import { configuredSpeechModel, currentSpeechModel, validSpeechModel, voiceStatus } from './voice.js';
 import { hostAvailable, readHostStatus, runHostAction, HostUnavailable, type HostAction } from './host.js';
 import { sizing, MODELS, EMBED_MODELS, UNCENSORED_MODELS, human } from './system.js';
+import { mediaOverview, mediaModel, MODEL_VOLUMES } from './media.js';
+import { containerDef, containerSizes, floorFor, memBytes, validCpus, validMem } from './containers.js';
 import { proxyInFlight, routeTable } from './proxy.js';
-import { SERVICES, SERVICE_VRAM_HINT } from './services.js';
+import { SERVICES, SERVICE_VRAM_HINT, isServiceId } from './services.js';
 import { throughput } from './metrics.js';
 import { recent, summary } from './activity.js';
 import * as tunnel from './tunnel.js';
@@ -239,56 +243,107 @@ export function buildApi(): Router {
 
   // ---------- models ----------
 
+  // Asked of Ollama on every call, and honest when it cannot be.
+  //
+  // The two lists used to be caught into empty arrays, which made an Ollama
+  // that was down indistinguishable from one holding nothing. On the machine
+  // whose whole job is holding models, that is the one mistake this page must
+  // not make quietly.
   r.get('/api/models', async (ctx) => {
     requireConsole(ctx);
-    const [installed, loaded] = await Promise.all([
-      ollama.listModels().catch(() => []),
-      ollama.loadedModels().catch(() => []),
-    ]);
+    const live = await ollama.liveModels();
+    const bytes = live.installed.reduce((n, m) => n + (m.size || 0), 0);
     sendJson(ctx.res, 200, {
-      installed,
-      loaded,
+      ok: live.ok,
+      error: live.error,
+      at: live.at,
+      installed: live.installed,
+      loaded: live.loaded,
+      pulls: listPulls(),
       catalog: MODELS,
       embedCatalog: EMBED_MODELS,
       uncensoredCatalog: UNCENSORED_MODELS,
       sizing: sizing(),
-      totalBytes: installed.reduce((n, m) => n + (m.size || 0), 0),
-      totalHuman: human(installed.reduce((n, m) => n + (m.size || 0), 0)),
+      totalBytes: bytes,
+      totalHuman: human(bytes),
     });
   });
 
+  const MODEL_NAME = /^[A-Za-z0-9._\/:-]{1,120}$/;
+
+  /**
+   * Ollama's own reasons, kept.
+   *
+   * The catch-all below answers "something went wrong on this end" and hides
+   * the message, which is right for a bug here and wrong for every failure in
+   * this section: "ollama has no model called X", "this model is still on the
+   * machine after the delete was accepted" and "does not support generate"
+   * are the whole answer, and a console that swallows them leaves the
+   * operator with a button that does nothing and no way to find out why.
+   */
+  const relaying = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try { return await fn(); } catch (e) {
+      if (e instanceof HttpError) throw e;
+      throw new HttpError(502, (e as Error)?.message ?? String(e));
+    }
+  };
+
   // Downloads stream their progress: a 20 GB model is a long wait, and a
   // progress bar that moves is the difference between "working" and "stuck".
+  //
+  // The download is a job, not this request. Closing the console, switching
+  // tab or reloading detaches the stream and leaves the download running —
+  // the page picks it back up from the `pulls` list above — and the only
+  // thing that stops one is /api/models/cancel.
   r.get('/api/models/pull', async (ctx) => {
     requireConsole(ctx);
     const name = ctx.url.searchParams.get('name') || '';
-    if (!/^[A-Za-z0-9._\/:-]{1,120}$/.test(name)) throw badRequest('that is not a model name');
+    if (!MODEL_NAME.test(name)) throw badRequest('that is not a model name');
+    startPull(name, async (emit, signal) => {
+      await ollama.pullModel(name, emit, signal);
+    });
     const stream = openEventStream(ctx.res);
-    const abort = new AbortController();
-    ctx.res.on('close', () => abort.abort());
-    try {
-      await ollama.pullModel(name, (p) => stream.send('progress', p), abort.signal);
-      stream.send('done', { name });
-    } catch (e) {
-      if (!abort.signal.aborted) stream.send('failed', { error: (e as Error).message });
-    } finally {
-      stream.close();
-    }
+    await new Promise<void>((resolve) => {
+      let done = false;
+      let detach: (() => void) | null = null;
+      const stop = (): void => { if (done) return; done = true; detach?.(); resolve(); };
+      detach = watchPull(name, (view) => {
+        stream.send('progress', view);
+        if (view.state === 'done') { stream.send('done', view); stop(); }
+        else if (view.state !== 'running') { stream.send('failed', { error: view.error ?? view.state, ...view }); stop(); }
+      });
+      if (!detach) { stream.send('failed', { error: 'that download is no longer running' }); resolve(); return; }
+      // The console going away detaches the watcher and nothing else.
+      ctx.res.on('close', stop);
+    });
+    stream.close();
   });
 
+  r.post('/api/models/cancel', async (ctx) => {
+    requireConsole(ctx);
+    const { name } = await readJson<{ name?: string }>(ctx.req);
+    if (!name) throw badRequest('which model?');
+    sendJson(ctx.res, 200, { cancelled: cancelPull(name) });
+  });
+
+  // The answer is the list, so the page redraws from what is actually on the
+  // machine rather than from the assumption that the row it asked about is
+  // gone. See ollama.deleteModel for why a 200 is not enough on its own.
   r.post('/api/models/delete', async (ctx) => {
     requireConsole(ctx);
     const { name } = await readJson<{ name?: string }>(ctx.req);
     if (!name) throw badRequest('which model?');
-    await ollama.deleteModel(name);
-    sendJson(ctx.res, 200, { ok: true });
+    if (!MODEL_NAME.test(name)) throw badRequest('that is not a model name');
+    const installed = await relaying(() => ollama.deleteModel(name));
+    const loaded = await ollama.loadedModels().catch(() => []);
+    sendJson(ctx.res, 200, { ok: true, deleted: name, installed, loaded });
   });
 
   r.post('/api/models/load', async (ctx) => {
     requireConsole(ctx);
     const { name } = await readJson<{ name?: string }>(ctx.req);
     if (!name) throw badRequest('which model?');
-    await ollama.loadModel(name);
+    await relaying(() => ollama.loadModel(name));
     sendJson(ctx.res, 200, { ok: true });
   });
 
@@ -296,7 +351,7 @@ export function buildApi(): Router {
     requireConsole(ctx);
     const { name } = await readJson<{ name?: string }>(ctx.req);
     if (!name) throw badRequest('which model?');
-    await ollama.unloadModel(name);
+    await relaying(() => ollama.unloadModel(name));
     sendJson(ctx.res, 200, { ok: true });
   });
 
@@ -304,7 +359,7 @@ export function buildApi(): Router {
     requireConsole(ctx);
     const name = ctx.url.searchParams.get('name') || '';
     if (!name) throw badRequest('which model?');
-    sendJson(ctx.res, 200, await ollama.showModel(name));
+    sendJson(ctx.res, 200, await relaying(() => ollama.showModel(name)));
   });
 
   // ---------- tokens ----------
@@ -377,7 +432,7 @@ export function buildApi(): Router {
       sshPort: typeof b.sshPort === 'number' ? b.sshPort : undefined,
       remotePort: typeof b.remotePort === 'number' ? b.remotePort : undefined,
       torProxy: typeof b.torProxy === 'string' ? b.torProxy.trim() : undefined,
-      services: Array.isArray(b.services) ? (b.services as string[]).filter((x) => ['chat', 'voice', 'image'].includes(x)) : undefined,
+      services: Array.isArray(b.services) ? (b.services as string[]).filter(isServiceId) : undefined,
     });
     sendJson(ctx.res, 201, { connection: shape(conn) });
   });
@@ -398,7 +453,7 @@ export function buildApi(): Router {
       remoteBind: typeof b.remoteBind === 'string' ? b.remoteBind.trim() : undefined,
       remotePort: typeof b.remotePort === 'number' ? b.remotePort : undefined,
       torProxy: typeof b.torProxy === 'string' ? b.torProxy.trim() : undefined,
-      services: Array.isArray(b.services) ? (b.services as string[]).filter((x) => ['chat', 'voice', 'image'].includes(x)) : undefined,
+      services: Array.isArray(b.services) ? (b.services as string[]).filter(isServiceId) : undefined,
     });
     const applied = await hostAction('tunnel.configure', conn.id, 30_000).catch((e: HttpError) => ({ ok: false, output: e.message }));
     sendJson(ctx.res, 200, { connection: shape(tunnel.getConnection(conn.id)), applied });
@@ -495,10 +550,73 @@ export function buildApi(): Router {
     const action = map[a];
     if (!action) throw notFound('no such action');
     const body = await readJson<{ service?: string }>(ctx.req).catch(() => ({} as { service?: string }));
-    const service = body.service === 'perch' || body.service === 'ollama' ? body.service : '';
+    // A named container has to be one perch runs; anything else is refused
+    // here rather than handed to the helper to refuse.
+    const service = body.service && containerDef(body.service) ? body.service : '';
     // Pulling images and starting containers are minutes-long jobs on a slow
     // line, so they get a long leash.
     sendJson(ctx.res, 200, await hostAction(action, service, 15 * 60_000));
+  });
+
+  // ---------- how big each container may be ----------
+  //
+  // The limits live in .env because compose reads them when it *creates* a
+  // container, which is also why applying one is a recreate. See
+  // containers.ts for why both the configured and the running value are
+  // reported rather than just the one perch wrote.
+
+  r.get('/api/containers', (ctx) => {
+    requireConsole(ctx);
+    sendJson(ctx.res, 200, {
+      containers: containerSizes(),
+      hostAvailable: hostAvailable(),
+      /** System memory, so the console can say when the limits add up to more than the machine has. */
+      totalMemBytes: (readHostStatus().status?.mem?.totalKb ?? 0) * 1024 || config.totalMemBytes,
+    });
+  });
+
+  r.put('/api/containers/:id/size', async (ctx) => {
+    requireConsole(ctx);
+    const def = containerDef(ctx.params.id!);
+    if (!def) throw notFound('no such container');
+    const body = await readJson<{ mem?: string; cpus?: string; apply?: boolean }>(ctx.req);
+
+    const writes: Array<{ key: string; value: string }> = [];
+    if (body.mem !== undefined) {
+      const mem = String(body.mem).trim();
+      if (!validMem(mem)) throw badRequest('A memory limit looks like 512m, 8g or 0 for no limit.');
+      const bytes = memBytes(mem);
+      // 0 is "no limit", which is always allowed. A real limit below the
+      // floor is not a slow container, it is one the kernel kills partway
+      // through loading a model — so it is refused with the reason.
+      if (bytes !== null && bytes > 0 && bytes < floorFor(def)) {
+        throw badRequest(`${def.label} needs at least ${human(floorFor(def))}; below that it is killed rather than slowed.`);
+      }
+      writes.push({ key: def.memKey, value: mem });
+    }
+    if (body.cpus !== undefined) {
+      const cpus = String(body.cpus).trim();
+      if (!validCpus(cpus)) throw badRequest('A CPU limit is a number of cores, such as 2 or 1.5 — or 0 for all of them.');
+      writes.push({ key: def.cpuKey, value: cpus });
+    }
+    if (writes.length === 0) throw badRequest('nothing to change');
+
+    const set: Array<{ key: string; ok: boolean; output: string }> = [];
+    for (const w of writes) {
+      const r2 = await hostAction('env.set', `${w.key}=${w.value}`, 20_000);
+      set.push({ key: w.key, ...r2 });
+      // Stop at the first failure rather than writing half a change and
+      // reporting success for the other half.
+      if (!r2.ok) break;
+    }
+    const wrote = set.every((x) => x.ok);
+    // Recreating perch itself takes this console down with it, so the answer
+    // is sent first and the request is left to be cut off — the browser
+    // treats a dropped connection as the restart it asked for.
+    const applied = wrote && body.apply
+      ? await hostAction('containers.recreate', def.id, 15 * 60_000).catch((e: Error) => ({ ok: false, output: e.message }))
+      : null;
+    sendJson(ctx.res, 200, { ok: wrote, set, applied, containers: containerSizes() });
   });
 
   r.post('/api/boot/:state', async (ctx) => {
@@ -512,8 +630,76 @@ export function buildApi(): Router {
     requireConsole(ctx);
     const s = ctx.params.service!;
     if (s === 'tunnel') { sendJson(ctx.res, 200, await hostAction('tunnel.logs', '', 20_000)); return; }
-    if (s !== 'perch' && s !== 'ollama') throw notFound('no such service');
+    if (s !== 'perch' && s !== 'ollama' && s !== 'whisper') throw notFound('no such service');
     sendJson(ctx.res, 200, await hostAction('logs', s, 30_000));
+  });
+
+  // ---------- the speech model ----------
+  //
+  // Not the same shape as the Ollama routes above, because whisper.cpp is not
+  // the same kind of server: it holds one model, chosen when it starts, and
+  // has no API for changing it. See voice.ts. What the console gets is the
+  // truth about which model that is and whether the transcriber is answering,
+  // and one way to change it — which means the environment and a restart.
+
+  r.get('/api/voice', async (ctx) => {
+    requireConsole(ctx);
+    sendJson(ctx.res, 200, await voiceStatus());
+  });
+
+  r.put('/api/voice/model', async (ctx) => {
+    requireConsole(ctx);
+    const { model, restart } = await readJson<{ model?: string; restart?: boolean }>(ctx.req);
+    if (!model) throw badRequest('which model?');
+    if (!validSpeechModel(model)) throw badRequest(`${model} is not a whisper.cpp model this console offers`);
+    // Nothing to do only when *both* agree: what .env asks for, and what
+    // compose passed this container when the two were last created together.
+    // Comparing with .env alone would refuse to re-apply a model that was
+    // written but never reached the container — which is exactly the state a
+    // failed switch leaves behind, and exactly when somebody retries.
+    if (model === (await configuredSpeechModel()).model && model === currentSpeechModel()) {
+      sendJson(ctx.res, 200, { ok: true, changed: false, status: await voiceStatus() });
+      return;
+    }
+    // Written to .env so it survives a restart, exactly as Ollama's own knobs
+    // are. Applying it needs the container recreated, which is a separate and
+    // slower step — and one worth being asked about, because it takes
+    // dictation down while the new weights are fetched.
+    const set = await hostAction('env.set', `WHISPER_MODEL=${model}`, 30_000);
+    if (!set.ok) { sendJson(ctx.res, 200, { ok: false, changed: false, set }); return; }
+    const applied = restart === false ? null : await hostAction('containers.restart', 'whisper', 15 * 60_000);
+    sendJson(ctx.res, 200, { ok: true, changed: true, set, applied, status: await voiceStatus() });
+  });
+
+  // ---------- images, video and audio ----------
+  //
+  // A catalogue rather than a manager, for the reason media.ts opens with: a
+  // diffusion server reads a directory and has no API for putting anything in
+  // it. So the console offers what to install, what each costs, whether the
+  // backend can see it, and the one command that puts it there — and never a
+  // Download button that does nothing.
+
+  r.get('/api/media', async (ctx) => {
+    requireConsole(ctx);
+    const overview = await mediaOverview();
+    sendJson(ctx.res, 200, { ...overview, volumes: MODEL_VOLUMES });
+  });
+
+  /**
+   * One model's files, for `./bin/perch fetch`.
+   *
+   * The script asks rather than carrying its own copy of the catalogue: two
+   * lists of URLs would disagree the first time one of them was edited, and
+   * the one that is wrong would be the one that downloads seven gigabytes.
+   */
+  r.get('/api/media/model', (ctx) => {
+    requireConsole(ctx);
+    const id = ctx.url.searchParams.get('id') || '';
+    const model = mediaModel(id);
+    if (!model) throw notFound(`no model called ${id || '(nothing)'} in the catalogue`);
+    const store = MODEL_VOLUMES[model.service] ?? null;
+    if (!store || model.bundled) throw badRequest(`${model.name} ships inside its container image, so there is nothing to fetch`);
+    sendJson(ctx.res, 200, { model, volume: store.volume, subdir: store.subdir });
   });
 
   // ---------- settings ----------
@@ -532,6 +718,7 @@ export function buildApi(): Router {
         enabled: wanted.has(svc.id),
         overlay: svc.overlay,
         ternField: svc.ternField,
+        speaks: svc.speaks,
         vramHintBytes: SERVICE_VRAM_HINT[svc.id],
         routes: routeTable(svc),
       })),
@@ -559,10 +746,14 @@ export function buildApi(): Router {
   r.put('/api/ollama-env', async (ctx) => {
     requireConsole(ctx);
     const body = await readJson<{ key?: string; value?: string }>(ctx.req);
+    // Container sizes are deliberately not here: they go through
+    // /api/containers/:id/size, which checks the value against what the
+    // container actually needs. Two ways in would mean one of them skipping
+    // that check.
     const allowed = [
       'OLLAMA_NUM_PARALLEL', 'OLLAMA_MAX_LOADED_MODELS', 'OLLAMA_MAX_QUEUE',
       'OLLAMA_KV_CACHE_TYPE', 'OLLAMA_FLASH_ATTENTION', 'OLLAMA_KEEP_ALIVE',
-      'OLLAMA_MEM_LIMIT', 'PERCH_MAX_CONCURRENT',
+      'PERCH_MAX_CONCURRENT',
     ];
     if (!body.key || !allowed.includes(body.key)) throw badRequest('that is not a settable key');
     if (!body.value || !/^[A-Za-z0-9_.-]{1,32}$/.test(body.value)) throw badRequest('that value is not allowed');

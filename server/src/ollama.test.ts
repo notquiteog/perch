@@ -67,6 +67,31 @@ test('unloading an embedding model does the same', async () => {
   assert.match(seen[1]!.body, /"keep_alive":0/, 'unloading must ask for keep_alive 0');
 });
 
+// Ollama takes keep_alive as a duration string with a unit, or as a number of
+// seconds. The console offers -1 for "never unload", and sending that as a
+// string is rejected by Go's ParseDuration before the model is even looked
+// up: `time: missing unit in duration "-1"`. So the setting the Settings page
+// recommends broke the Load button, with an error about duration units.
+test('keep_alive goes over the wire in a shape Ollama accepts', () => {
+  assert.equal(ollama.keepAliveValue('-1'), -1, 'a bare number must be a number, not a string');
+  assert.equal(ollama.keepAliveValue('0'), 0);
+  assert.equal(ollama.keepAliveValue('3600'), 3600);
+  assert.equal(ollama.keepAliveValue('10m'), '10m', 'a value with a unit is already valid');
+  assert.equal(ollama.keepAliveValue('30s'), '30s');
+  assert.equal(ollama.keepAliveValue(''), '10m', 'no setting falls back to the default');
+  assert.equal(ollama.keepAliveValue(null), '10m');
+});
+
+test('loading with "never unload" sends a number, not a duration string', async () => {
+  const { updateState } = await import('./state.js');
+  updateState((st) => { st.settings.keepAlive = '-1'; });
+  seen.length = 0;
+  await ollama.loadModel('gemma4:12b');
+  assert.match(seen[0]!.body, /"keep_alive":-1/, 'as JSON -1, which Ollama reads as seconds');
+  assert.doesNotMatch(seen[0]!.body, /"keep_alive":"-1"/, 'as a string it is a ParseDuration error');
+  updateState((st) => { st.settings.keepAlive = '10m'; });
+});
+
 test('a real failure still surfaces rather than being swallowed', async () => {
   seen.length = 0;
   await assert.rejects(() => ollama.loadModel('nonexistent-model'), /could not load/);

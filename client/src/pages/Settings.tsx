@@ -146,7 +146,7 @@ export default function Settings() {
               {busy === 'ka' ? <Spinner /> : 'Save'}
             </button>
           </div>
-          <span className="hint">A duration such as 30s, 10m or 1h. −1 never unloads; 0 unloads immediately after each answer.</span>
+          <span className="hint">A duration such as 30s, 10m or 1h. <span className="mono">-1</span> never unloads; <span className="mono">0</span> unloads immediately after each answer.</span>
         </div>
       </Card>
 

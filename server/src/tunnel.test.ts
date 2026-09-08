@@ -169,9 +169,37 @@ test('adding dictation and images adds consecutive ports', async () => {
     [['chat', 11500], ['voice', 11501], ['image', 11502]]);
 });
 
+// The offset is the service's position in the fixed list, not its position in
+// what was ticked. That is what stops enabling video later from renumbering
+// the port dictation already uses on the far side — a change that would break
+// silently, because the tunnel would come up and land on the wrong port.
+test('a service keeps its port whatever else is switched on', async () => {
+  const c = await t.createConnection({
+    name: 'Chat and audio', host: 'chataudio.example.com', remotePort: 11600,
+    services: ['chat', 'audio'],
+  });
+  assert.deepEqual(t.forwardsFor(c).map((x) => [x.id, x.remotePort]),
+    [['chat', 11600], ['audio', 11604]]);
+
+  const more = await t.updateConnection(c.id, { services: ['chat', 'voice', 'audio'] });
+  const after = t.forwardsFor(more).find((f) => f.id === 'audio')!;
+  assert.equal(after.remotePort, 11604, 'adding dictation must not move audio');
+});
+
 test('chat is always carried, even if a caller omits it', async () => {
   const c = await t.createConnection({ name: 'Voice only', host: 'voiceonly.example.com', services: ['voice'] });
   assert.ok(t.forwardsFor(c).some((f) => f.id === 'chat'), 'chat must always be forwarded');
+});
+
+// An address on its own does not tell anybody what to send it, and only two
+// of these have a field in Tern to be pasted into. Every service must say
+// what it speaks, or the Connect page hands out a port with no explanation.
+test('every address says what it speaks', () => {
+  const c = t.listConnections().find((x) => x.name === 'Everything')!;
+  for (const u of t.ternUrls({ ...c, remoteBind: '10.89.0.1' })) {
+    assert.ok(u.speaks.length > 10, `${u.id} does not say what it speaks`);
+    assert.match(u.url, /^http:\/\/[a-z0-9.]+:\d+$/);
+  }
 });
 
 test('the setup command permitlists every forwarded port', async () => {

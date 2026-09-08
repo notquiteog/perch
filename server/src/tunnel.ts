@@ -11,6 +11,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import net from 'node:net';
 import { config } from './config.js';
+import { SERVICES } from './services.js';
 import { loadState, updateState, newConnection, keyPathFor, type Connection } from './state.js';
 import { readHostStatus, runHostAction } from './host.js';
 import { badRequest, notFound } from './http.js';
@@ -21,8 +22,12 @@ const CONF_DIR = path.join(config.stateDir, 'tunnels');
  * Which ports a connection carries, and where each lands.
  *
  * The far side's ports are consecutive from the chat port because every one of
- * them must appear in that machine's permitlisten: three consecutive numbers
- * is one thing to check, three arbitrary ones is three.
+ * them must appear in that machine's permitlisten: a run of consecutive
+ * numbers is one thing to check, five arbitrary ones is five.
+ *
+ * The offset is the service's position in this list rather than its position
+ * in what the connection asked for, so enabling video later does not
+ * renumber the ports dictation was already using on the far side.
  */
 export function forwardsFor(c: Connection): Array<{ id: string; localPort: number; remotePort: number; label: string }> {
   // Host-side ports: the tunnel runs on the host, so it forwards from what
@@ -31,6 +36,8 @@ export function forwardsFor(c: Connection): Array<{ id: string; localPort: numbe
     { id: 'chat', port: config.hostChatPort, label: 'Chat' },
     { id: 'voice', port: config.hostVoicePort, label: 'Dictation' },
     { id: 'image', port: config.hostImagePort, label: 'Images' },
+    { id: 'video', port: config.hostVideoPort, label: 'Video' },
+    { id: 'audio', port: config.hostAudioPort, label: 'Audio' },
   ];
   return order
     .map((svc, i) => ({ ...svc, offset: i }))
@@ -254,20 +261,24 @@ export function ternBaseUrlLiteral(c: Connection): string {
 }
 
 /** One base URL per forwarded service, for the console to hand over. */
-export function ternUrls(c: Connection): Array<{ id: string; label: string; url: string; literal: string; ternField: string | null }> {
+export function ternUrls(c: Connection): Array<{
+  id: string; label: string; url: string; literal: string; ternField: string | null; speaks: string;
+}> {
   const host = !c.remoteBind || c.remoteBind === '127.0.0.1' ? '127.0.0.1' : 'host.containers.internal';
-  const fields: Record<string, string | null> = {
-    chat: 'Admin → AI model → Base URL',
-    voice: 'Admin → AI model → Dictation → Transcriber address',
-    image: null,
-  };
-  return forwardsFor(c).map((f) => ({
-    id: f.id,
-    label: f.label,
-    url: `http://${host}:${f.remotePort}`,
-    literal: `http://${c.remoteBind || '127.0.0.1'}:${f.remotePort}`,
-    ternField: fields[f.id] ?? null,
-  }));
+  // Where each one goes in Tern, for the two Tern has settings for. The rest
+  // are ordinary HTTP endpoints with a bearer token, which is what `speaks`
+  // is for — an address on its own does not tell you what to send it.
+  return forwardsFor(c).map((f) => {
+    const def = SERVICES.find((s) => s.id === f.id);
+    return {
+      id: f.id,
+      label: f.label,
+      url: `http://${host}:${f.remotePort}`,
+      literal: `http://${c.remoteBind || '127.0.0.1'}:${f.remotePort}`,
+      ternField: def?.ternField ?? null,
+      speaks: def?.speaks ?? '',
+    };
+  });
 }
 
 const RAW = 'https://raw.githubusercontent.com/notquiteog/perch/main/deploy/tern-side-setup.sh';
