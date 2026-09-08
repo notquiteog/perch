@@ -292,17 +292,34 @@ ask_for_key() {
 
   Open perch's console, go to the connection for this box, and copy either
   its ${B}Run one command on ...${N} line or just the key under ${B}Its key${N}.
-  Paste it here. A blank line sets up the address only.
+  Paste it here — several lines are fine, and a blank line ends it.
+  A blank line on its own sets up the address only.
 
 EOF
   local line buf="" key=""
   printf '  paste: '
-  while IFS= read -r line < /dev/tty; do
+  # Read to the END of the paste, not to the first key.
+  #
+  # The console's command is several lines, and --user and --port come after
+  # the --key line. Stopping at the key took the key and left the ports at
+  # their default, which permits one port on the far side — and then fails
+  # the whole tunnel rather than just that service, because ssh runs with
+  # ExitOnForwardFailure and a connection carrying three cannot bind the two
+  # it was never permitted.
+  #
+  # A blank line ends the paste. So does a second of silence once a key is in
+  # hand, which is what keeps a one-line paste to a single Enter: pasted
+  # lines arrive together, a person typing does not.
+  while :; do
+    if [ -n "$key" ]; then
+      IFS= read -r -t 1 line < /dev/tty || break
+    else
+      IFS= read -r line < /dev/tty || break
+    fi
     [ -z "$line" ] && break
     buf="$buf$line
 "
     key="$(key_in "$buf")"
-    [ -n "$key" ] && break
   done
   [ -n "$key" ] || { note "nothing pasted; setting up the address only"; return 0; }
   PUBKEY="$key"
@@ -343,7 +360,8 @@ if [ -n "$PUBKEY" ]; then
     ok "key accepted"
     warn "it carries no comment, so it does not say which perch connection it is from"
   fi
-  note "account $TUNNEL_USER, port(s) ${PORT_LIST[*]}"
+  ok "account $TUNNEL_USER, port(s) ${PORT_LIST[*]}"
+  note "every port the connection carries has to be here, or the tunnel fails as a whole"
 fi
 
 step "Checking the address is free"
