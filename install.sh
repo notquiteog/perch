@@ -553,7 +553,10 @@ ${KOKORO_IMAGE:+KOKORO_IMAGE=$KOKORO_IMAGE}
 # Ollama. These are read when it starts, so change them here (or in the
 # console) and restart.
 OLLAMA_NUM_PARALLEL=$OLLAMA_NUM_PARALLEL
-OLLAMA_MAX_LOADED_MODELS=1
+# Two: a chat model and an embedding model stay resident together, so search
+# does not evict what you are talking to. Ollama keeps the second only if it
+# fits.
+OLLAMA_MAX_LOADED_MODELS=2
 OLLAMA_FLASH_ATTENTION=1
 OLLAMA_KV_CACHE_TYPE=q8_0
 OLLAMA_MAX_QUEUE=32

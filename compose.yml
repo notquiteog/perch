@@ -20,10 +20,15 @@ services:
       # context window of KV cache, so this is a memory decision as much as a
       # speed one; install.sh sizes it from the GPU.
       OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-2}
-      # One model resident at a time. Ollama's own default is three, which on
-      # a single-GPU box means two models nobody is using are holding the
-      # memory the one in use needs.
-      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      # A language model and an embedding model, resident together. Ollama's
+      # own default is three, which on a single-GPU box means two models
+      # nobody is using are holding the memory the one in use needs — but one
+      # was too few in the other direction: an embedder costs well under a
+      # gigabyte, and at one every meaning search evicted the chat model,
+      # which the next reply then reloaded. This is a ceiling rather than a
+      # reservation, so a second model that will not fit beside the first is
+      # still evicted exactly as before.
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-2}
       OLLAMA_FLASH_ATTENTION: ${OLLAMA_FLASH_ATTENTION:-1}
       # Halves what each slot's context costs at close to no quality cost,
       # which is what makes several slots affordable. Needs flash attention.
