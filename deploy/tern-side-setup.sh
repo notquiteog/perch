@@ -148,10 +148,11 @@ case "$PUBKEY" in
   ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*\ *) ;;
   *) die "that does not look like an SSH public key." ;;
 esac
-# One port per service the connection carries: chat, and optionally dictation
-# and images. Each has to be named in permitlisten, or the key may bind the
-# first and nothing else — which fails as a tunnel that connects and then
-# carries only some of what it should.
+# One port per service the connection carries: chat, and optionally dictation,
+# images, video and audio. They are not a range — each service lands on the
+# port it is normally found on — so every one has to be named in permitlisten,
+# or the key may bind the first and nothing else, which fails as a tunnel that
+# connects and then carries only some of what it should.
 IFS=',' read -ra PORT_LIST <<< "$PORT"
 for p in "${PORT_LIST[@]}"; do
   [[ "$p" =~ ^[0-9]{2,5}$ ]] || die "--port takes port numbers, comma separated for more than one."

@@ -44,23 +44,37 @@ carries every service instead:
 
 ```
 -R 10.89.0.1:11434:127.0.0.1:11434   # chat
--R 10.89.0.1:11435:127.0.0.1:8080    # dictation
--R 10.89.0.1:11436:127.0.0.1:7860    # images
--R 10.89.0.1:11437:127.0.0.1:8188    # video
--R 10.89.0.1:11438:127.0.0.1:8880    # audio
+-R 10.89.0.1:8080:127.0.0.1:8080     # dictation
+-R 10.89.0.1:7860:127.0.0.1:7860     # images
+-R 10.89.0.1:8188:127.0.0.1:8188     # video
+-R 10.89.0.1:8880:127.0.0.1:8880     # audio
 ```
 
-The two sides are numbered independently, and the block above is the clearest
-statement of why. Here, each service sits where that service is normally
-found. On the far side they run consecutively from the chat port, because
-every one of them must be named in that machine's `permitlisten`: a run of
-numbers is one thing to check, and five scattered ones is five. Neither
-constraint has anything to say about the other.
+Each service keeps its number at both ends, so what Tern dials is the port
+that service is normally found on. That is the whole reason for the numbering
+and it is worth nothing if it stops at this machine: Tern talks to the far
+side, so the far side is where a familiar number actually saves somebody a
+setting.
 
-Each service's offset is its position in that fixed list, not its position in
-what you ticked — so switching video on later does not renumber the port
-dictation was already using on the far side. A connection carrying only chat
-and audio therefore uses 11434 and 11438, with a gap.
+Chat is the exception and takes whatever port the connection was given. The
+machine Tern runs on may well have an Ollama of its own on 11434, and this one
+has to go somewhere else when it does. Nothing else has a conflict like that
+to dodge.
+
+These used to run consecutively from the chat port, on the grounds that a run
+of numbers is one thing to name in the far side's `permitlisten` and five
+scattered ones is five. It did not survive contact with the setup script,
+which takes the ports as a list and writes one `permitlisten` line per port,
+and always did — so a range was never the thing being checked.
+
+Ticking a service still cannot move another one's port, which the consecutive
+scheme took an offset into a fixed list to guarantee. Here it falls out of the
+ports not being derived from each other at all.
+
+What it does cost: two connections to the same machine cannot both carry the
+same service, because both would try to bind that one port over there. Chat
+can be moved out of the way and the rest cannot, so perch refuses the second
+one when it is set up rather than letting it fail at connect time.
 
 The other reason is memory, and it is the stronger one. These share a card.
 Two independent apps would compete for it with no coordination and silently

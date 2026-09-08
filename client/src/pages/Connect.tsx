@@ -8,20 +8,16 @@ import { Card, CodeBlock, Copy, Empty, Notice, Spinner, Tag } from '../component
  * others untouched.
  */
 /**
- * The services a connection can carry, in the order the tunnel numbers them.
+ * The services a connection can carry, in the order they are listed.
  *
- * The offset is a service's position in this list rather than its position in
- * what was ticked, so switching video on later does not renumber the port
- * dictation is already using on the far side. It also means the far-side range
- * is decided by the *last* service ticked, not by how many were.
+ * Each keeps its own port at both ends, so ticking one has no effect on the
+ * numbers any of the others use. Chat is the exception and takes the port
+ * chosen below, because the machine at the far end may run an Ollama of its
+ * own on the usual one.
  */
 const SERVICE_ORDER: Array<[string, string]> = [
   ['chat', 'Chat'], ['voice', 'Dictation'], ['image', 'Images'], ['video', 'Video'], ['audio', 'Audio'],
 ];
-
-function portSpan(services: string[]): number {
-  return Math.max(0, ...services.map((id) => SERVICE_ORDER.findIndex(([x]) => x === id)));
-}
 
 export default function Connect() {
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -160,9 +156,9 @@ export default function Connect() {
               })}
             </div>
             <span className="hint">
-              One SSH session carries all of them, on consecutive ports from the one above —
-              so {form.remotePort}{portSpan(form.services) > 0 ? ` to ${form.remotePort + portSpan(form.services)}` : ''} on
-              the far side. Only services enabled on this machine can be carried.
+              One SSH session carries all of them. Chat lands on {form.remotePort} over there;
+              each of the others lands on the same port it uses here, so Tern dials the number
+              that service is normally found on. Only services enabled on this machine can be carried.
             </span>
           </div>
           <button className="primary" disabled={busy !== null || !form.host || !form.name}
@@ -459,9 +455,10 @@ function ConnectionCard({ c, open, busy, onToggle, onRun, setMessage, available 
                   })}
                 </div>
                 <span className="hint">
-                  One SSH session carries all of them, on {c.remotePort}
-                  {portSpan(edit.services) > 0 ? ` to ${c.remotePort + portSpan(edit.services)}` : ''} over there.
-                  Adding one means the far side must permit the new port too — the setup command below
+                  One SSH session carries all of them: chat on {c.remotePort} over there, and each
+                  of the others on the port it uses here — {c.forwards.filter((f) => f.id !== 'chat')
+                    .map((f) => f.remotePort).join(', ') || 'none yet'}.
+                  Adding one means the far side must permit that port too — the setup command below
                   is regenerated with it.
                 </span>
               </div>

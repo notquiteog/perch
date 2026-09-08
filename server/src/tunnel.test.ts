@@ -149,10 +149,9 @@ test('forgetting drops the record for good', () => {
   assert.equal(t.listConnections().some((c) => c.id === retired.id), false);
 });
 
-// One SSH session carries every service the connection is set up for, on
-// consecutive ports, because each has to be named in the far side's
-// permitlisten and consecutive numbers are one thing to check rather than
-// three.
+// One SSH session carries every service the connection is set up for, each on
+// the port that service is normally found on, so Tern needs a token rather
+// than a new number.
 test('a chat-only connection forwards one port', async () => {
   const c = await t.createConnection({ name: 'Chat only', host: 'chatonly.example.com', remotePort: 11434 });
   const f = t.forwardsFor(c);
@@ -160,30 +159,58 @@ test('a chat-only connection forwards one port', async () => {
   assert.deepEqual(f.map((x) => [x.id, x.remotePort]), [['chat', 11434]]);
 });
 
-test('adding dictation and images adds consecutive ports', async () => {
+// Each service lands on its own number at both ends, so what Tern dials is
+// the port that service is normally found on. Chat is the exception: the far
+// side may already run an Ollama on the usual port, so this one keeps the
+// port the connection was given.
+test('each service lands on its own port, chat on the one it was given', async () => {
   const c = await t.createConnection({
     name: 'Everything', host: 'everything.example.com', remotePort: 11500,
     services: ['chat', 'voice', 'image'],
   });
   assert.deepEqual(t.forwardsFor(c).map((x) => [x.id, x.remotePort]),
-    [['chat', 11500], ['voice', 11501], ['image', 11502]]);
+    [['chat', 11500], ['voice', 8080], ['image', 7860]]);
+  // Both ends of a mirrored service agree, which is the point of the change.
+  for (const f of t.forwardsFor(c)) {
+    if (f.id !== 'chat') assert.equal(f.remotePort, f.localPort, `${f.id} must mirror`);
+  }
 });
 
-// The offset is the service's position in the fixed list, not its position in
-// what was ticked. That is what stops enabling video later from renumbering
-// the port dictation already uses on the far side — a change that would break
-// silently, because the tunnel would come up and land on the wrong port.
+// Ticking one service must not move another's port. It held under the old
+// consecutive scheme because the offset was a position in a fixed list; it
+// holds now because the port is not derived from the others at all. Either
+// way the failure it guards against is silent — the tunnel comes up and lands
+// on the wrong port.
 test('a service keeps its port whatever else is switched on', async () => {
   const c = await t.createConnection({
     name: 'Chat and audio', host: 'chataudio.example.com', remotePort: 11600,
     services: ['chat', 'audio'],
   });
   assert.deepEqual(t.forwardsFor(c).map((x) => [x.id, x.remotePort]),
-    [['chat', 11600], ['audio', 11604]]);
+    [['chat', 11600], ['audio', 8880]]);
 
   const more = await t.updateConnection(c.id, { services: ['chat', 'voice', 'audio'] });
   const after = t.forwardsFor(more).find((f) => f.id === 'audio')!;
-  assert.equal(after.remotePort, 11604, 'adding dictation must not move audio');
+  assert.equal(after.remotePort, 8880, 'adding dictation must not move audio');
+});
+
+// Mirroring costs this: two connections to one machine would both try to bind
+// the same port there. Chat can be moved out of the way with its own port,
+// and the rest cannot, so the second one is refused rather than left to fail
+// at connect time under ExitOnForwardFailure.
+test('two connections to one machine may not both carry a service', async () => {
+  await assert.rejects(
+    () => t.createConnection({
+      name: 'Second dictation', host: 'everything.example.com', remotePort: 11700,
+      services: ['chat', 'voice'],
+    }),
+    /already carries dictation/,
+  );
+  // A different machine is fine, and so is a second connection carrying only
+  // chat, which has a port of its own to move to.
+  await assert.doesNotReject(() => t.createConnection({
+    name: 'Chat as well', host: 'everything.example.com', remotePort: 11700, services: ['chat'],
+  }));
 });
 
 test('chat is always carried, even if a caller omits it', async () => {
@@ -205,14 +232,14 @@ test('every address says what it speaks', () => {
 test('the setup command permitlists every forwarded port', async () => {
   const c = t.listConnections().find((x) => x.name === 'Everything')!;
   const cmd = t.setupCommand({ ...c, publicKey: 'ssh-ed25519 AAAA test' });
-  assert.match(cmd!, /--port 11500,11501,11502/);
+  assert.match(cmd!, /--port 11500,8080,7860/);
 });
 
 test('the ssh command has one -R per service', () => {
   const c = t.listConnections().find((x) => x.name === 'Everything')!;
   const preview = t.sshCommandPreview({ ...c, remoteBind: '10.89.0.1' });
   assert.equal((preview.match(/-R /g) ?? []).length, 3);
-  assert.match(preview, /-R 10\.89\.0\.1:11501:127\.0\.0\.1:/);
+  assert.match(preview, /-R 10\.89\.0\.1:8080:127\.0\.0\.1:8080/);
 });
 
 test('Tern gets a URL per service, and knows where each one goes', () => {

@@ -21,13 +21,20 @@ const CONF_DIR = path.join(config.stateDir, 'tunnels');
 /**
  * Which ports a connection carries, and where each lands.
  *
- * The far side's ports are consecutive from the chat port because every one of
- * them must appear in that machine's permitlisten: a run of consecutive
- * numbers is one thing to check, five arbitrary ones is five.
+ * Each service keeps its own number on both sides, so what Tern dials is the
+ * port that service is normally found on — 8080 for a transcriber, 7860 for
+ * Stable Diffusion — rather than a position in a list. That is the whole
+ * reason for the numbering: a client already written against one of these
+ * needs a token, not a new port.
  *
- * The offset is the service's position in this list rather than its position
- * in what the connection asked for, so enabling video later does not
- * renumber the ports dictation was already using on the far side.
+ * Chat is the exception, and keeps its own far-side port: the machine Tern
+ * runs on may well have an Ollama of its own on 11434, and this one has to go
+ * somewhere else when it does. The others have no such conflict to dodge.
+ *
+ * The far side no longer gets a contiguous run to authorise, which the
+ * consecutive scheme was chosen for. It costs nothing in practice —
+ * tern-side-setup.sh takes the list and writes one permitlisten entry per
+ * port, and always did, so a range was never the thing being checked.
  */
 export function forwardsFor(c: Connection): Array<{ id: string; localPort: number; remotePort: number; label: string }> {
   // Host-side ports: the tunnel runs on the host, so it forwards from what
@@ -40,9 +47,13 @@ export function forwardsFor(c: Connection): Array<{ id: string; localPort: numbe
     { id: 'audio', port: config.hostAudioPort, label: 'Audio' },
   ];
   return order
-    .map((svc, i) => ({ ...svc, offset: i }))
     .filter((svc) => (c.services ?? ['chat']).includes(svc.id))
-    .map((svc) => ({ id: svc.id, localPort: svc.port, remotePort: c.remotePort + svc.offset, label: svc.label }));
+    .map((svc) => ({
+      id: svc.id,
+      localPort: svc.port,
+      remotePort: svc.id === 'chat' ? c.remotePort : svc.port,
+      label: svc.label,
+    }));
 }
 
 // ---------- identity ----------
@@ -138,6 +149,27 @@ export function validate(input: Partial<Connection>, selfId?: string): void {
       );
     }
   }
+
+  // The same, for the services that do not get to choose. Chat can be moved
+  // out of the way with the port above; dictation and the rest land on their
+  // own number at both ends, so two connections to one machine cannot both
+  // carry the same one. Before the far side mirrored these, a different chat
+  // port moved the whole run and this could not arise.
+  if (input.host && input.services) {
+    const mine = input.services.filter((id) => id !== 'chat');
+    for (const c of loadState().connections) {
+      if (c.id === selfId || c.retiredAt || c.host !== input.host) continue;
+      const shared = mine.filter((id) => (c.services ?? ['chat']).includes(id));
+      if (shared.length === 0) continue;
+      const labels = forwardsFor(c).filter((f) => shared.includes(f.id));
+      throw badRequest(
+        `"${c.name}" already carries ${labels.map((f) => f.label.toLowerCase()).join(' and ')} on ${input.host}, `
+        + `on ${labels.map((f) => f.remotePort).join(' and ')}. `
+        + 'Two connections to one machine cannot both forward a service. '
+        + 'Switch it off on one of them, or remove that connection first.',
+      );
+    }
+  }
 }
 
 // ---------- writing ----------
@@ -184,7 +216,12 @@ export async function createConnection(input: Partial<Connection>): Promise<Conn
 
 export async function updateConnection(id: string, patch: Partial<Connection>): Promise<Connection> {
   const before = getConnection(id);
-  validate({ ...patch, host: patch.host ?? before.host, remotePort: patch.remotePort ?? before.remotePort }, id);
+  validate({
+    ...patch,
+    host: patch.host ?? before.host,
+    remotePort: patch.remotePort ?? before.remotePort,
+    services: patch.services ?? before.services,
+  }, id);
   // Explicit undefined would blank a field the caller never mentioned.
   const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)) as Partial<Connection>;
   const next = updateState((s) => {
