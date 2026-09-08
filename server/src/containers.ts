@@ -112,6 +112,102 @@ export function containerDef(id: string): ContainerDef | undefined {
 }
 
 /**
+ * The tuning keys the console may set, and which container reads each one.
+ *
+ * The same recreate-not-restart rule as the sizes above governs these, for the
+ * same reason: compose hands a container its environment when it *creates*
+ * it, so a restarted container reads back what it already had. Knowing which
+ * container a key belongs to is what makes applying one possible at all —
+ * OLLAMA_NUM_PARALLEL is read by Ollama, PERCH_MAX_CONCURRENT by perch, and
+ * recreating the wrong one leaves the setting exactly as unapplied as a
+ * restart did.
+ *
+ * The memory and CPU keys are deliberately absent. They go through
+ * /api/containers/:id/size, which refuses a value below what the container
+ * needs; a second way in would be a way around that check.
+ *
+ * Every key here also has to be one the host helper will write — see
+ * do_env_set in deploy/perch-hostd, which keeps its own list because it is
+ * the thing with root and cannot trust this one.
+ */
+export const TUNING_KEYS: Record<string, string> = {
+  OLLAMA_NUM_PARALLEL: 'ollama',
+  OLLAMA_MAX_LOADED_MODELS: 'ollama',
+  OLLAMA_MAX_QUEUE: 'ollama',
+  OLLAMA_KV_CACHE_TYPE: 'ollama',
+  OLLAMA_FLASH_ATTENTION: 'ollama',
+  OLLAMA_KEEP_ALIVE: 'ollama',
+  PERCH_MAX_CONCURRENT: 'perch',
+};
+
+/** The container a tuning key belongs to, or undefined if it is not settable. */
+export function containerForTuningKey(key: string | undefined): ContainerDef | undefined {
+  const id = key ? TUNING_KEYS[key] : undefined;
+  return id ? containerDef(id) : undefined;
+}
+
+export interface TuningValue {
+  key: string;
+  container: string;
+  /** What .env asks for, read from the file by the host helper. */
+  configured: string | null;
+  /** What the container was created with, or null when nothing could say. */
+  running: string | null;
+  /** Written, not yet applied: both are known and they disagree. */
+  pending: boolean;
+}
+
+/**
+ * Both figures for every tuning key, out of the host helper's answer.
+ *
+ * The helper writes one `<scope>\t<KEY>=<value>` line per thing it found:
+ * scope `env` for what .env asks for, and the container's own name for what
+ * that container was created with. Two scopes rather than two actions,
+ * because the pair is only meaningful read together — the gap between them is
+ * a change that has been written and not applied, which is exactly the state
+ * that used to be invisible.
+ *
+ * A running value is only believed from the container that actually reads the
+ * key. Ollama's environment happens to be where most of these live, but
+ * `perch OLLAMA_NUM_PARALLEL=...` would be perch's copy of a number Ollama
+ * reads, and reporting that as what is running would be a confident lie in
+ * precisely the case somebody is trying to diagnose.
+ */
+export function tuningReport(helperOutput: string, ownEnv: Record<string, string | undefined> = process.env): TuningValue[] {
+  const configured: Record<string, string> = {};
+  const running: Record<string, string> = {};
+  for (const line of helperOutput.split('\n')) {
+    const tab = line.indexOf('\t');
+    const eq = line.indexOf('=', tab + 1);
+    if (tab < 0 || eq < 0) continue;
+    const scope = line.slice(0, tab);
+    const key = line.slice(tab + 1, eq);
+    const value = line.slice(eq + 1).trim();
+    if (!TUNING_KEYS[key] || !value) continue;
+    if (scope === 'env') configured[key] = value;
+    else if (scope === TUNING_KEYS[key]) running[key] = value;
+  }
+
+  return Object.entries(TUNING_KEYS).map(([key, container]) => {
+    const set = configured[key] ?? null;
+    // perch is the container the console is running in, so its own
+    // environment is what perch is running with — no podman needed, and still
+    // true when the helper cannot answer at all.
+    const live = running[key] ?? (container === 'perch' ? (ownEnv[key] ?? null) : null);
+    return {
+      key,
+      container,
+      configured: set,
+      running: live,
+      // Only when both are known. A key absent from .env is compose's own
+      // default rather than a pending change, and an unknown running value is
+      // a question nothing answered — neither of those is a difference.
+      pending: Boolean(set && live && set !== live),
+    };
+  });
+}
+
+/**
  * A memory limit as a person writes it, in bytes. `0` and an empty value both
  * mean unlimited, which is what compose does with them.
  */

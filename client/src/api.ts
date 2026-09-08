@@ -197,6 +197,18 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await res.json()) as T;
 }
 
+export interface TuningKey {
+  key: string;
+  /** The container that reads it, and so the one that has to be recreated. */
+  container: string;
+  /** What .env asks for, read from the file rather than remembered. */
+  configured: string | null;
+  /** What the container was created with, or null when nothing could say. */
+  running: string | null;
+  /** Written, not yet applied: both are known and they disagree. */
+  pending: boolean;
+}
+
 export const api = {
   session: () => request<{ passwordSet: boolean; authenticated: boolean; loopback: boolean; containerised: boolean; version: string }>('/api/session'),
   signIn: (password: string) => request<{ ok: true }>('/api/session', { method: 'POST', body: JSON.stringify({ password }) }),
@@ -271,8 +283,19 @@ export const api = {
   }>('/api/settings'),
   saveSettings: (body: Partial<{ allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean }>) =>
     request<{ settings: { allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean } }>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
-  setOllamaEnv: (key: string, value: string) =>
-    request<{ ok: boolean; output: string }>('/api/ollama-env', { method: 'PUT', body: JSON.stringify({ key, value }) }),
+  // Both halves of each knob: what .env asks for, and what the container that
+  // reads it was actually created with. They differ while a change is written
+  // and not applied, which is the only way to see that from the console.
+  ollamaEnv: () => request<{ hostAvailable: boolean; keys: TuningKey[] }>('/api/ollama-env'),
+  // `apply` recreates the container that reads the key. Without it the value
+  // is written to .env and nothing else — which is the honest half of what
+  // this used to claim a restart would do.
+  setOllamaEnv: (key: string, value: string, apply = false) =>
+    request<{
+      ok: boolean; output: string; key: string; container: string;
+      set: { ok: boolean; output: string };
+      applied: { ok: boolean; output: string } | null;
+    }>('/api/ollama-env', { method: 'PUT', body: JSON.stringify({ key, value, apply }) }),
 
   activity: (limit = 100) => request<{
     entries: Array<{ at: string; method: string; path: string; status: number; ms: number; bytes: number; token: string | null; ip: string; note?: string }>;

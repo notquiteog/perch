@@ -132,4 +132,118 @@ test('only the services this machine runs are switched on', () => {
   assert.equal(rows.find((r) => r.id === 'comfy')!.enabled, false);
 });
 
+// The tuning keys, which share the sizes' rule: a value in .env reaches the
+// process that reads it only when the container is created again. Applying one
+// therefore means recreating a *particular* container, and the mapping below
+// is the whole of how the console knows which. Recreating the wrong one would
+// leave the setting exactly as unapplied as the restart that used to be
+// advertised here, while looking like it had worked.
+test('every tuning key names a container that exists', () => {
+  for (const [key, id] of Object.entries(c.TUNING_KEYS)) {
+    assert.ok(c.containerDef(id), `${key} is read by "${id}", which is not a container perch runs`);
+    assert.equal(c.containerForTuningKey(key)!.id, id);
+  }
+  assert.equal(c.containerForTuningKey('OLLAMA_NUM_PARALLEL')!.id, 'ollama');
+  assert.equal(c.containerForTuningKey('PERCH_MAX_CONCURRENT')!.id, 'perch',
+    'perch reads its own concurrency limit; recreating Ollama would not apply it');
+});
+
+test('a key that is not settable has no container, so nothing is recreated for it', () => {
+  assert.equal(c.containerForTuningKey('PATH'), undefined);
+  assert.equal(c.containerForTuningKey(undefined), undefined);
+  assert.equal(c.containerForTuningKey(''), undefined);
+});
+
+// Sizes have their own route because it refuses a limit below what the
+// container needs — a limit set too low is an out-of-memory kill, not a slow
+// container. A size key reachable through the tuning route as well would be a
+// way around that check.
+test('the size keys are not settable as tuning keys', () => {
+  for (const def of c.CONTAINERS) {
+    assert.equal(c.TUNING_KEYS[def.memKey], undefined, `${def.memKey} must go through the size route`);
+    assert.equal(c.TUNING_KEYS[def.cpuKey], undefined, `${def.cpuKey} must go through the size route`);
+  }
+});
+
+// The host helper keeps its own list of writable keys, because it is the part
+// with root and does not trust the console's. Offering a key it will refuse is
+// a setting that fails at the last step, which is the failure people report as
+// "the console does nothing".
+test('the host helper will write every key the console offers', () => {
+  const helper = fs.readFileSync(new URL('../../deploy/perch-hostd', import.meta.url), 'utf8');
+  const body = helper.slice(helper.indexOf('do_env_set()'));
+  const accepted = new Set(body.slice(0, body.indexOf('\n}')).match(/[A-Z][A-Z0-9_]{2,}/g) ?? []);
+  for (const key of Object.keys(c.TUNING_KEYS)) {
+    assert.ok(accepted.has(key), `${key} is offered by the console but not accepted by deploy/perch-hostd`);
+  }
+});
+
+// The two figures for a tuning knob, which exist for the same reason the two
+// figures for a size do: a value written into .env and not yet applied is the
+// state somebody is in when they say a setting did nothing, and it has to be
+// visible rather than inferred.
+const HELPER = [
+  'env\tOLLAMA_NUM_PARALLEL=4',
+  'env\tOLLAMA_MAX_LOADED_MODELS=2',
+  'env\tOLLAMA_KEEP_ALIVE=10m',
+  'ollama\tOLLAMA_NUM_PARALLEL=2',
+  'ollama\tOLLAMA_MAX_LOADED_MODELS=2',
+  'ollama\tOLLAMA_KEEP_ALIVE=10m',
+].join('\n');
+
+test('a value written but not applied is reported as pending, not as applied', () => {
+  const rows = c.tuningReport(HELPER, {});
+  const parallel = rows.find((r) => r.key === 'OLLAMA_NUM_PARALLEL')!;
+  assert.equal(parallel.configured, '4', 'what .env asks for');
+  assert.equal(parallel.running, '2', 'what the container was created with');
+  assert.equal(parallel.pending, true, 'and the difference is the whole point');
+
+  const loaded = rows.find((r) => r.key === 'OLLAMA_MAX_LOADED_MODELS')!;
+  assert.equal(loaded.pending, false, 'agreeing values are not a pending change');
+});
+
+test('an unknown running value is not treated as a difference', () => {
+  // Nothing answered for the queue depth — podman absent, or the container
+  // never created. "Unknown" is not "changed", and saying so would send
+  // somebody to recreate a container to fix nothing.
+  const rows = c.tuningReport(HELPER, {});
+  const queue = rows.find((r) => r.key === 'OLLAMA_MAX_QUEUE')!;
+  assert.equal(queue.configured, null);
+  assert.equal(queue.running, null);
+  assert.equal(queue.pending, false);
+});
+
+test('a running value is only believed from the container that reads the key', () => {
+  // perch is passed OLLAMA_NUM_PARALLEL in its own environment in some
+  // deployments; it is not what Ollama is running with, and reporting it as
+  // such would be a confident wrong answer in the one case being diagnosed.
+  const rows = c.tuningReport('env\tOLLAMA_NUM_PARALLEL=4\nperch\tOLLAMA_NUM_PARALLEL=4', {});
+  const parallel = rows.find((r) => r.key === 'OLLAMA_NUM_PARALLEL')!;
+  assert.equal(parallel.running, null, 'perch cannot answer for Ollama');
+  assert.equal(parallel.pending, false);
+});
+
+test("perch answers for itself out of its own environment", () => {
+  // The console is the perch container, so what it was created with is
+  // readable without asking podman anything — and stays readable when the
+  // host helper is not answering at all.
+  const rows = c.tuningReport('env\tPERCH_MAX_CONCURRENT=6', { PERCH_MAX_CONCURRENT: '4' });
+  const row = rows.find((r) => r.key === 'PERCH_MAX_CONCURRENT')!;
+  assert.equal(row.configured, '6');
+  assert.equal(row.running, '4');
+  assert.equal(row.pending, true);
+});
+
+test('noise in the helper output is skipped rather than parsed into a value', () => {
+  const rows = c.tuningReport([
+    'podman: command not found',
+    'env\tPATH=/usr/bin',
+    'env\tOLLAMA_KV_CACHE_TYPE=',
+    'env\tOLLAMA_FLASH_ATTENTION=1',
+  ].join('\n'), {});
+  assert.equal(rows.find((r) => r.key === 'OLLAMA_KV_CACHE_TYPE')!.configured, null, 'an empty value is not a value');
+  assert.equal(rows.find((r) => r.key === 'OLLAMA_FLASH_ATTENTION')!.configured, '1');
+  assert.equal(rows.length, Object.keys(c.TUNING_KEYS).length, 'every key is reported, and only the keys');
+});
+
 test.after(() => fs.rmSync(stateDir, { recursive: true, force: true }));

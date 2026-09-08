@@ -352,22 +352,23 @@ run_action() {
   case "$action" in
     containers.start)    compose up -d ;;
     containers.stop)     compose down ;;
+    # A restart is a restart: the same container, started again. It does not
+    # re-read .env — compose fixes a container's environment when it *creates*
+    # it — so nothing that applies a setting may ask for this. Four of the six
+    # services used to be quietly recreated here instead, which made "restart"
+    # mean one thing for whisper and another for Ollama, and left the callers
+    # that needed a recreate looking as though a restart were enough. They ask
+    # for containers.recreate now, and this does what its name says.
     containers.restart)
       case "$arg" in
         ''|all)      compose restart ;;
-        # whisper is restarted after WHISPER_MODEL changes. `up -d` rather
-        # than `restart`, because a restart reuses the existing container with
-        # the environment it was created with — the new model would not be
-        # read until something else recreated it, which is a change that
-        # silently does nothing. The same is true of every optional service
-        # whose model or size is set in .env.
-        whisper|sd|comfy|kokoro) compose up -d --force-recreate "$arg" ;;
-        perch|ollama) compose restart "$arg" ;;
+        perch|ollama|whisper|sd|comfy|kokoro) compose restart "$arg" ;;
         *)           echo "unknown service: $arg"; return 2 ;;
       esac ;;
-    # Resource limits are fixed when a container is created, so applying a new
-    # size is always a recreate — a restart would leave the value sitting in
-    # .env doing nothing, which is the worst way for a setting to fail.
+    # Both a resource limit and a tuning value are fixed when a container is
+    # created, so applying either is a recreate — a restart would leave the
+    # new value sitting in .env doing nothing, which is the worst way for a
+    # setting to fail.
     containers.recreate)
       case "$arg" in
         perch|ollama|whisper|sd|comfy|kokoro) compose up -d --force-recreate "$arg" ;;
@@ -402,6 +403,7 @@ run_action() {
       esac ;;
     env.set)             do_env_set "$arg" ;;
     env.get)             do_env_get "$arg" ;;
+    env.tuning)          do_env_tuning ;;
     whisper.model)       do_whisper_model ;;
     daemon.reload)       systemctl daemon-reload 2>&1 ;;
     *)
@@ -718,6 +720,66 @@ do_whisper_model() {
   [ -n "$name" ] || { echo ""; return 0; }
   cmd=$(podman inspect "$name" --format '{{range .Config.Cmd}}{{.}} {{end}}' 2>/dev/null) || true
   printf '%s\n' "$cmd" | grep -oE 'ggml-[A-Za-z0-9.-]+\.bin' | head -1 | sed -e 's/^ggml-//' -e 's/\.bin$//'
+}
+
+# The tuning keys, grouped by the container that reads each one. The console
+# has its own copy of this in server/src/containers.ts; this is the one with
+# root behind it, so it is the one that decides.
+OLLAMA_TUNING_KEYS=(OLLAMA_NUM_PARALLEL OLLAMA_MAX_LOADED_MODELS OLLAMA_MAX_QUEUE
+                    OLLAMA_KV_CACHE_TYPE OLLAMA_FLASH_ATTENTION OLLAMA_KEEP_ALIVE)
+PERCH_TUNING_KEYS=(PERCH_MAX_CONCURRENT)
+
+# One of this project's containers, by its compose service name.
+#
+# The compose labels are the reliable answer where podman-compose sets them.
+# The fallback is the name it builds, <project>_<service>_<index>, matched on a
+# field other than the first — "perch" is both the project and a service, so a
+# first-field match would hand back perch_ollama_1 when asked for perch.
+compose_container() {
+  local svc="$1" n
+  n=$(podman ps --all --filter "label=io.podman.compose.project=perch" \
+        --filter "label=io.podman.compose.service=$svc" --format '{{.Names}}' 2>/dev/null | head -1)
+  [ -n "$n" ] && { printf '%s\n' "$n"; return 0; }
+  podman ps --all --format '{{.Names}}' 2>/dev/null \
+    | awk -F'[-_]' -v s="$svc" '/perch/ { for (i = 2; i <= NF; i++) if ($i == s) { print; exit } }'
+}
+
+# What one container was actually created with, for the keys it reads.
+tuning_running() {
+  local svc="$1"; shift
+  local name pattern="" key
+  name=$(compose_container "$svc")
+  [ -n "$name" ] || return 0
+  for key in "$@"; do pattern+="${pattern:+|}$key"; done
+  podman inspect "$name" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | grep -E "^($pattern)=" \
+    | while IFS= read -r line; do printf '%s\t%s\n' "$svc" "$line"; done
+}
+
+# Every tuning key twice over: what .env asks for, and what the container that
+# reads it is actually running with.
+#
+# The gap between those two is the whole point. A value written and not yet
+# applied shows up here as an `env` line that its container's line disagrees
+# with — which is the state the console has to be able to draw, because it is
+# the state somebody is in when they say a setting did nothing. Neither answer
+# can be had from inside a container: .env is on the host, and no container can
+# read another's environment.
+#
+# One action rather than one per key. Every request is a file written, a poll
+# and a file read; seven of those to fill one card is a pause you can see.
+do_env_tuning() {
+  local key value
+  if [ -f "$PERCH_DIR/.env" ]; then
+    for key in "${OLLAMA_TUNING_KEYS[@]}" "${PERCH_TUNING_KEYS[@]}"; do
+      value=$(sed -n "s/^$key=//p" "$PERCH_DIR/.env" | tail -1)
+      [ -n "$value" ] && printf 'env\t%s=%s\n' "$key" "$value"
+    done
+  fi
+  have podman || return 0
+  tuning_running ollama "${OLLAMA_TUNING_KEYS[@]}"
+  tuning_running perch "${PERCH_TUNING_KEYS[@]}"
+  return 0
 }
 
 # Read one of the settable keys back.

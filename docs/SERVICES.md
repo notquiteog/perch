@@ -283,6 +283,35 @@ None of this touches video memory. What shares the card is decided by which
 models are loaded, which is what the sizes above and the Services panel are
 about.
 
+## Ollama's tuning knobs
+
+**System → Ollama tuning** sets the handful of values Ollama reads when it
+starts: how many requests it answers at once, how many models stay resident,
+how its context cache is stored, how deep its queue goes.
+
+The same rule as the sizes governs these, for the same reason. They are
+written into `.env`, and compose hands a container its environment when it
+*creates* it — so a restart gives Ollama back the values it already had and
+the new one sits in the file doing nothing. Each knob therefore has two
+buttons: **Set** writes it and says so, and **Set and recreate Ollama** writes
+it and creates the container again so that something actually reads it.
+
+And, as with the sizes, each knob shows two figures: what `.env` asks for,
+which is the value in the box, and what Ollama is *running* with, read from
+the container itself. While those disagree the knob is marked **written, not
+applied**, and the second button changes to **Recreate Ollama** — there is
+nothing left to write, only something left to apply.
+
+Recreating Ollama drops whatever model is resident and interrupts anything
+generating at that moment; the next request loads the model again. That is why
+it is a separate button and why the console asks before doing it, rather than
+applying every change the moment it is typed.
+
+Elsewhere in the console and in `./bin/perch`, **restart** means a restart and
+nothing more: the same container, started again, with the environment it was
+created with. Anything that has to reach a container through `.env` — a size,
+a tuning knob, the speech model — asks for a recreate instead.
+
 ## Adding another
 
 A service is a `ServiceDef` in `server/src/services.ts`: an id, a port, an

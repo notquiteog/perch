@@ -18,7 +18,7 @@ import { configuredSpeechModel, currentSpeechModel, validSpeechModel, voiceStatu
 import { hostAvailable, readHostStatus, runHostAction, HostUnavailable, type HostAction } from './host.js';
 import { sizing, MODELS, EMBED_MODELS, UNCENSORED_MODELS, human } from './system.js';
 import { mediaOverview, mediaModel, MODEL_VOLUMES } from './media.js';
-import { containerDef, containerSizes, floorFor, memBytes, validCpus, validMem } from './containers.js';
+import { containerDef, containerForTuningKey, containerSizes, floorFor, memBytes, tuningReport, validCpus, validMem } from './containers.js';
 import { proxyInFlight, routeTable } from './proxy.js';
 import { SERVICES, SERVICE_VRAM_HINT, isServiceId } from './services.js';
 import { throughput } from './metrics.js';
@@ -679,9 +679,16 @@ export function buildApi(): Router {
     // are. Applying it needs the container recreated, which is a separate and
     // slower step — and one worth being asked about, because it takes
     // dictation down while the new weights are fetched.
+    //
+    // Recreated, not restarted. whisper-server is told its model on its
+    // command line, which compose builds from .env when it *creates* the
+    // container; a restart would bring back the same command line and the
+    // same weights. This used to ask for a restart and get a recreate,
+    // because the helper quietly recreated whisper on any restart — which
+    // worked, and meant the two words did not mean what they said.
     const set = await hostAction('env.set', `WHISPER_MODEL=${model}`, 30_000);
     if (!set.ok) { sendJson(ctx.res, 200, { ok: false, changed: false, set }); return; }
-    const applied = restart === false ? null : await hostAction('containers.restart', 'whisper', 15 * 60_000);
+    const applied = restart === false ? null : await hostAction('containers.recreate', 'whisper', 15 * 60_000);
     sendJson(ctx.res, 200, { ok: true, changed: true, set, applied, status: await voiceStatus() });
   });
 
@@ -756,22 +763,66 @@ export function buildApi(): Router {
   });
 
   // Ollama's own knobs live in .env, because Ollama reads them at startup.
-  // Changing one writes the file and says so; it takes effect on restart.
+  //
+  // Which is why writing the file is only half the job. Compose hands a
+  // container its environment when it *creates* it, so the process running
+  // now holds the values it was created with and a restart gives them
+  // straight back — the new number sits in the file doing nothing. Applying
+  // one of these is a recreate, for exactly the reason a container size is:
+  // see the size endpoint above and the note at the top of containers.ts.
+  // The console said "restart the containers to apply it" for a long time,
+  // which was advice that could not work.
+  //
+  // Writing without applying is still a legitimate answer, so `apply` is the
+  // caller's choice: recreating Ollama drops whatever model is resident, and
+  // somebody mid-sentence would rather that waited.
+  //
+  // Which key belongs to which container is containers.ts's business, along
+  // with why the memory and CPU keys are not settable here.
+  // Both halves of every knob: what .env asks for, and what the container
+  // that reads it is actually running with. They differ exactly while a value
+  // has been written and not yet applied — the state that used to be
+  // invisible, so a setting that had silently not taken effect looked
+  // identical to one that had. The same two figures the container sizes show,
+  // for the same reason.
+  r.get('/api/ollama-env', async (ctx) => {
+    requireConsole(ctx);
+    const available = hostAvailable();
+    // A console with no helper still draws the card; it just cannot say what
+    // anything is set to. Better an empty field than a confident wrong one.
+    const raw = available
+      ? await hostAction('env.tuning', '', 20_000).catch(() => ({ ok: false, output: '' }))
+      : { ok: false, output: '' };
+
+    sendJson(ctx.res, 200, { hostAvailable: available, keys: tuningReport(raw.output) });
+  });
+
   r.put('/api/ollama-env', async (ctx) => {
     requireConsole(ctx);
-    const body = await readJson<{ key?: string; value?: string }>(ctx.req);
-    // Container sizes are deliberately not here: they go through
-    // /api/containers/:id/size, which checks the value against what the
-    // container actually needs. Two ways in would mean one of them skipping
-    // that check.
-    const allowed = [
-      'OLLAMA_NUM_PARALLEL', 'OLLAMA_MAX_LOADED_MODELS', 'OLLAMA_MAX_QUEUE',
-      'OLLAMA_KV_CACHE_TYPE', 'OLLAMA_FLASH_ATTENTION', 'OLLAMA_KEEP_ALIVE',
-      'PERCH_MAX_CONCURRENT',
-    ];
-    if (!body.key || !allowed.includes(body.key)) throw badRequest('that is not a settable key');
+    const body = await readJson<{ key?: string; value?: string; apply?: boolean }>(ctx.req);
+    const def = containerForTuningKey(body.key);
+    if (!def) throw badRequest('that is not a settable key');
     if (!body.value || !/^[A-Za-z0-9_.-]{1,32}$/.test(body.value)) throw badRequest('that value is not allowed');
-    sendJson(ctx.res, 200, await hostAction('env.set', `${body.key}=${body.value}`, 20_000));
+    const set = await hostAction('env.set', `${body.key}=${body.value}`, 20_000);
+    // A recreate here pulls no images and starts one container, but Ollama on
+    // a cold page cache can still take a while to answer again, so it gets the
+    // same leash as the size endpoint's.
+    //
+    // Recreating perch means recreating the container serving this request:
+    // the answer never arrives and the browser sees the connection drop,
+    // exactly as it does when perch is resized. The console warns first.
+    const applied = set.ok && body.apply
+      ? await hostAction('containers.recreate', def.id, 15 * 60_000).catch((e: Error) => ({ ok: false, output: e.message }))
+      : null;
+    sendJson(ctx.res, 200, {
+      ok: set.ok && (applied ? applied.ok : true),
+      key: body.key,
+      container: def.id,
+      set,
+      applied,
+      // The failure worth reading, for a caller that only looks at this.
+      output: !set.ok ? set.output : (applied && !applied.ok ? applied.output : set.output),
+    });
   });
 
   // ---------- activity ----------

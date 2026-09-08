@@ -92,7 +92,11 @@ export type HostAction =
   // goes stale as soon as a setting changes without perch being recreated.
   // whisper.model reports what the speech container is actually started with,
   // which nothing inside a container can see.
-  | 'logs' | 'env.set' | 'env.get' | 'whisper.model' | 'daemon.reload';
+  // env.tuning is both halves of the same question in one round trip: what
+  // .env asks for, and what each container was created with. One action
+  // rather than one env.get per key, because each of those is a file written
+  // and polled for.
+  | 'logs' | 'env.set' | 'env.get' | 'env.tuning' | 'whisper.model' | 'daemon.reload';
 
 export interface HostResult { ok: boolean; code: number; output: string }
 
