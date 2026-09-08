@@ -259,26 +259,66 @@ read_containers() {
 }
 
 unit_state() {
-  # active/inactive/failed plus whether it starts at boot, for one unit.
-  local unit="$1" active enabled since
+  # active/inactive/failed plus whether it starts at boot, for one unit. The
+  # optional second argument is why it is not up, for the units that can say.
+  local unit="$1" reason="${2-}" active enabled since
   active=$(systemctl is-active "$unit" 2>/dev/null || true)
   enabled=$(systemctl is-enabled "$unit" 2>/dev/null || true)
   since=$(systemctl show "$unit" -p ActiveEnterTimestamp --value 2>/dev/null || true)
-  printf '{"unit":%s,"active":%s,"enabled":%s,"since":%s}' \
-    "$(jstr "$unit")" "$(jstr "${active:-unknown}")" "$(jstr "${enabled:-unknown}")" "$(jstr "$since")"
+  printf '{"unit":%s,"active":%s,"enabled":%s,"since":%s,"reason":%s}' \
+    "$(jstr "$unit")" "$(jstr "${active:-unknown}")" "$(jstr "${enabled:-unknown}")" "$(jstr "$since")" \
+    "$(jstr "$reason")"
+}
+
+# Why a tunnel is not up, in one word, read from its own journal.
+#
+# systemd has only "activating" or "failed" to offer, and Restart=always means
+# a tunnel that can never work looks exactly like one that is about to. The
+# two failures that actually happen both follow an ssh key being replaced at
+# one end or the other, and neither clears itself:
+#
+#   host-key-changed  the far side was rebuilt, so its host key is not the one
+#                     in known_hosts. accept-new accepts a *first* key, never a
+#                     changed one — which is what makes it safe and also what
+#                     leaves this stuck until somebody says the new key is real.
+#   key-rejected      this end's key is not in the far side's authorized_keys.
+#                     Usually a key regenerated here after setup was run there.
+#
+# Neither is guessed at from the exit status. ssh says both of these plainly,
+# so the journal is read rather than divined.
+tunnel_reason() {
+  local unit="$1" log
+  log=$(journalctl -u "$unit" -n 40 --no-pager 2>/dev/null) || return 0
+  case "$log" in
+    *"REMOTE HOST IDENTIFICATION HAS CHANGED"*|*"Host key verification failed"*)
+      printf 'host-key-changed' ;;
+    *"denied (publickey"*|*"Permission denied, please try again"*)
+      printf 'key-rejected' ;;
+    *"remote port forwarding failed"*)
+      printf 'forward-refused' ;;
+    *"Could not resolve hostname"*)
+      printf 'host-unknown' ;;
+    *"Connection refused"*|*"Connection timed out"*|*"No route to host"*|*"Operation timed out"*)
+      printf 'unreachable' ;;
+    *) printf '' ;;
+  esac
 }
 
 # Every connection has its own unit, so the console is told about all of them
 # rather than about one. Units are found on disk rather than asked of systemd,
 # so a unit that exists but has never been started still shows up.
 read_tunnels() {
-  local out="" first=1 f unit
+  local out="" first=1 f unit reason
   for f in /etc/systemd/system/perch-tunnel-*.service; do
     [ -e "$f" ] || continue
     unit="$(basename "$f")"
     [ $first -eq 0 ] && out+=","
     first=0
-    out+="$(unit_state "$unit")"
+    # The journal is only read for a tunnel that is not up. A healthy one is
+    # the common case and this runs on every status poll.
+    reason=""
+    [ "$(systemctl is-active "$unit" 2>/dev/null)" = active ] || reason="$(tunnel_reason "$unit")"
+    out+="$(unit_state "$unit" "$reason")"
   done
   printf '[%s]' "$out"
 }
@@ -347,6 +387,8 @@ run_action() {
         tunnel.disable) systemctl disable --now "$(unit_for "$arg")" 2>&1 ;;
         tunnel.logs)    journalctl -u "$(unit_for "$arg")" -n 100 --no-pager 2>&1 ;;
       esac ;;
+    tunnel.hostkey)      do_tunnel_hostkey "$arg" ;;
+    tunnel.rehost)       do_tunnel_rehost "$arg" ;;
     tunnel.keygen)       do_keygen "$arg" ;;
     tunnel.configure)    do_tunnel_configure "$arg" ;;
     tunnel.remove)       do_tunnel_remove "$arg" ;;
@@ -371,6 +413,70 @@ run_action() {
 # A dedicated key per connection, generated on this box and never leaving it.
 # Per connection rather than shared, so retiring one cannot strand another and
 # a key that leaks is good for exactly one machine.
+# Read the host and ssh port a connection was configured with. Both actions
+# below need them and neither should trust an argument for it.
+tunnel_endpoint() {
+  local id="$1" conf="$STATE_DIR/tunnels/$1.conf" k v
+  [ -f "$conf" ] || { echo "no configuration for $id yet" >&2; return 1; }
+  TE_HOST=""; TE_PORT=""
+  while IFS='=' read -r k v; do
+    case "$k" in HOST) TE_HOST="$v" ;; SSH_PORT) TE_PORT="$v" ;; esac
+  done < "$conf"
+  [[ $TE_HOST =~ ^[A-Za-z0-9._-]{1,253}$ ]] || { echo "bad host" >&2; return 2; }
+  [[ $TE_PORT =~ ^[0-9]{1,5}$ ]] || TE_PORT=22
+  return 0
+}
+
+# What host key the far side is offering now, and what is on file for it.
+#
+# This is the half that makes accepting a changed key an informed decision
+# rather than a blind one. A changed host key is what a rebuilt server looks
+# like; it is also what a machine-in-the-middle looks like, and nothing here
+# can tell the two apart. Only somebody who can check the fingerprint against
+# the far side can, so the console shows both and asks.
+do_tunnel_hostkey() {
+  local id="$1"
+  valid_id "$id" || { echo "bad connection id"; return 2; }
+  tunnel_endpoint "$id" || return $?
+  local kh="$STATE_DIR/ssh/$id/known_hosts"
+  echo "host: $TE_HOST:$TE_PORT"
+  echo "offered now:"
+  ssh-keyscan -T 10 -p "$TE_PORT" "$TE_HOST" 2>/dev/null | ssh-keygen -lf - 2>/dev/null \
+    | sed 's/^/  /' || echo "  (could not reach it)"
+  echo "on file:"
+  if [ -s "$kh" ]; then
+    ssh-keygen -lf "$kh" 2>/dev/null | sed 's/^/  /' || echo "  (unreadable)"
+  else
+    echo "  (nothing yet)"
+  fi
+}
+
+# Forget the host key on file so the next connection learns the current one.
+#
+# Only ever run because somebody asked for it after seeing both fingerprints.
+# StrictHostKeyChecking=accept-new will take a first key on its own but never
+# a replacement, which is the behaviour worth keeping — so this removes the
+# old entry rather than weakening the option.
+do_tunnel_rehost() {
+  local id="$1"
+  valid_id "$id" || { echo "bad connection id"; return 2; }
+  tunnel_endpoint "$id" || return $?
+  local kh="$STATE_DIR/ssh/$id/known_hosts"
+  [ -f "$kh" ] || { echo "no known_hosts for $id yet; nothing to forget"; return 0; }
+  # ssh writes "[host]:port" when the port is not 22 and a bare host when it
+  # is. Which one is on file depends on how the connection was configured, so
+  # both are removed.
+  ssh-keygen -R "$TE_HOST" -f "$kh" >/dev/null 2>&1 || true
+  ssh-keygen -R "[$TE_HOST]:$TE_PORT" -f "$kh" >/dev/null 2>&1 || true
+  rm -f "$kh.old"
+  # ssh-keygen -R rewrites the file, so the tunnel account has to be given it
+  # back or the next connection cannot read its own known_hosts.
+  chown "$TUNNEL_USER" "$kh" 2>/dev/null || true
+  chmod 600 "$kh" 2>/dev/null || true
+  systemctl restart "$(unit_for "$id")" 2>&1 || true
+  echo "forgot the old host key for $TE_HOST; the tunnel will learn the current one when it reconnects"
+}
+
 do_keygen() {
   local id="$1"
   valid_id "$id" || { echo "bad connection id"; return 2; }

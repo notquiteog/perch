@@ -464,6 +464,20 @@ export function buildApi(): Router {
     sendJson(ctx.res, 200, { publicKey: await tunnel.generateKey(ctx.params.id!) });
   });
 
+  // Reading the far side's host key is a GET because it changes nothing here;
+  // accepting it is a POST because it does. Two calls rather than one so the
+  // fingerprints can be looked at before anything is written.
+  r.get('/api/connections/:id/hostkey', async (ctx) => {
+    requireConsole(ctx);
+    sendJson(ctx.res, 200, { hostKeys: await tunnel.hostKeys(ctx.params.id!) });
+  });
+
+  r.post('/api/connections/:id/hostkey', async (ctx) => {
+    requireConsole(ctx);
+    const output = await tunnel.acceptNewHostKey(ctx.params.id!);
+    sendJson(ctx.res, 200, { connection: shape(tunnel.getConnection(ctx.params.id!)), output });
+  });
+
   // One paste and the rest happens: save the address, render the unit, start
   // the tunnel, enable it at boot, and make a token if there is not one.
   r.post('/api/connections/:id/pair', async (ctx) => {

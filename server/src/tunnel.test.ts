@@ -213,6 +213,46 @@ test('two connections to one machine may not both carry a service', async () => 
   }));
 });
 
+// ---------- why a tunnel is not up ----------
+//
+// Restart=always means a tunnel that can never work looks exactly like one
+// about to come up, and the two failures that follow a replaced key stay
+// broken until somebody acts on them. So the reason ssh gave is carried
+// through to the console rather than left in the journal.
+function writeHostStatus(unit: string, active: string, reason: string): void {
+  const dir = path.join(stateDir, 'host');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({
+    at: new Date().toISOString(),
+    tunnels: [{ unit, active, enabled: 'enabled', since: '', reason }],
+  }));
+}
+
+test('a changed host key and a rejected key are told apart, and explained', async () => {
+  const c = await t.createConnection({ name: 'Keys', host: 'keys.example.com', remotePort: 12000 });
+  const unit = `perch-tunnel-${c.id}.service`;
+
+  writeHostStatus(unit, 'activating', 'host-key-changed');
+  let st = t.statusOf(t.getConnection(c.id));
+  assert.equal(st.problem, 'host-key-changed');
+  assert.match(st.problemSays, /machine in the middle/, 'must not present this as routine');
+
+  writeHostStatus(unit, 'activating', 'key-rejected');
+  st = t.statusOf(t.getConnection(c.id));
+  assert.equal(st.problem, 'key-rejected');
+  assert.match(st.problemSays, /setup command again/);
+
+  // A reason the console does not know about must not become a problem code,
+  // or a future helper string would render as an empty explanation.
+  writeHostStatus(unit, 'activating', 'something-new');
+  assert.equal(t.statusOf(t.getConnection(c.id)).problem, '');
+  assert.equal(t.statusOf(t.getConnection(c.id)).problemSays, '');
+
+  // A running tunnel says nothing at all.
+  writeHostStatus(unit, 'active', '');
+  assert.equal(t.statusOf(t.getConnection(c.id)).problem, '');
+});
+
 test('chat is always carried, even if a caller omits it', async () => {
   const c = await t.createConnection({ name: 'Voice only', host: 'voiceonly.example.com', services: ['voice'] });
   assert.ok(t.forwardsFor(c).some((f) => f.id === 'chat'), 'chat must always be forwarded');

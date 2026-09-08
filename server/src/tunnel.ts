@@ -386,11 +386,46 @@ export interface ConnectionStatus {
   enabled: string;
   since: string;
   retired: boolean;
+  /** Why it is not up, when ssh said so plainly. '' when it is up or quiet. */
+  problem: TunnelProblem | '';
+  /** That, in a sentence, with what to do about it. */
+  problemSays: string;
+}
+
+export type TunnelProblem =
+  | 'host-key-changed' | 'key-rejected' | 'forward-refused' | 'host-unknown' | 'unreachable';
+
+/**
+ * What each failure means, in the words somebody debugging it needs.
+ *
+ * Restart=always is what makes this worth saying at all: a tunnel that can
+ * never work looks exactly like one that is about to, and both of the key
+ * failures below stay broken until a person does something about them.
+ */
+const PROBLEM_SAYS: Record<TunnelProblem, string> = {
+  'host-key-changed':
+    'The far side is offering a different host key from the one on file. That is what a rebuilt '
+    + 'server looks like — and also what a machine in the middle looks like, and nothing here can '
+    + 'tell them apart. Compare the fingerprints before accepting the new one.',
+  'key-rejected':
+    'The far side refused this connection\'s key. Usually the key was regenerated here after the '
+    + 'setup command was run there, so its authorized_keys still has the old one. Run the setup '
+    + 'command again on that machine.',
+  'forward-refused':
+    'The far side would not let this bind one of the ports. Its permitlisten has to name every '
+    + 'port this connection carries — adding a service means running the setup command again.',
+  'host-unknown': 'That hostname does not resolve from this machine.',
+  unreachable: 'Nothing answered on that address and port.',
+};
+
+function problemOf(reason: string | undefined): TunnelProblem | '' {
+  return reason && reason in PROBLEM_SAYS ? (reason as TunnelProblem) : '';
 }
 
 export function statusOf(c: Connection): ConnectionStatus {
   const { status } = readHostStatus();
   const unit = (status?.tunnels ?? []).find((t) => t.unit === `perch-tunnel-${c.id}.service`);
+  const problem = problemOf(unit?.reason);
   return {
     id: c.id,
     configured: Boolean(c.host && c.remoteBind),
@@ -399,7 +434,35 @@ export function statusOf(c: Connection): ConnectionStatus {
     enabled: unit?.enabled ?? 'unknown',
     since: unit?.since ?? '',
     retired: Boolean(c.retiredAt),
+    problem,
+    problemSays: problem ? PROBLEM_SAYS[problem] : '',
   };
+}
+
+/**
+ * The far side's host key as it is now, against what is on file.
+ *
+ * Shown rather than acted on. A changed host key cannot be told from an
+ * interception by anything running here, so the only safe move is to put both
+ * fingerprints in front of somebody who can check one of them.
+ */
+export async function hostKeys(id: string): Promise<string> {
+  const result = await runHostAction('tunnel.hostkey', id, 20_000);
+  if (!result.ok) throw badRequest(result.output || 'could not read the host key');
+  return result.output;
+}
+
+/**
+ * Forget the host key on file, so the next connection learns the current one.
+ *
+ * accept-new takes a first key by itself and never a replacement, which is
+ * the behaviour worth keeping — so this drops the stale entry rather than
+ * turning the checking off.
+ */
+export async function acceptNewHostKey(id: string): Promise<string> {
+  const result = await runHostAction('tunnel.rehost', id, 30_000);
+  if (!result.ok) throw badRequest(result.output || 'could not forget the old host key');
+  return result.output;
 }
 
 /**

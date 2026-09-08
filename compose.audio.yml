@@ -20,7 +20,12 @@ services:
     # The GPU build. install.sh writes the `-cpu` one instead on a machine
     # with no GPU, because the GPU image will not start without a CUDA device
     # to find and the failure is a long way from its cause.
-    image: ${KOKORO_IMAGE:-ghcr.io/remsky/kokoro-fastapi-gpu:latest}
+    # The CPU build by default. Kokoro is 82M parameters and generates
+    # faster than real time on a few cores, so the GPU build buys little
+    # and costs the card — and on a GPU newer than its torch it does not
+    # run at all, failing with "no kernel image is available" after the
+    # model has loaded. install.sh sets KOKORO_IMAGE to override.
+    image: ${KOKORO_IMAGE:-ghcr.io/remsky/kokoro-fastapi-cpu:latest}
     restart: unless-stopped
     # Never published to the host, same as the others.
     mem_limit: ${KOKORO_MEM_LIMIT:-4g}

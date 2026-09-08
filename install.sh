@@ -110,9 +110,65 @@ ok "${RAM_GB} GB of memory, $(nproc) cores"
 # that exist: naming `comfy` in a file used by an install without the video
 # overlay would create a second, image-less service and fail the whole `up`.
 # Only the services actually switched on are ever named.
+
+# Which image a service runs, read from the compose file that defines it
+# rather than repeated here. The overlays write `image: ${VAR:-default}`, so
+# the default and any override in .env both resolve the same way they will
+# when compose reads it — a second copy of these defaults in this script would
+# be one more thing to get out of step.
+compose_image_for() {
+  local svc="$1" file raw resolved
+  case "$svc" in
+    ollama)  file="compose.yml" ;;
+    whisper) file="compose.voice.yml" ;;
+    sd)      file="compose.image.yml" ;;
+    comfy)   file="compose.video.yml" ;;
+    kokoro)  file="compose.audio.yml" ;;
+    *)       return 0 ;;
+  esac
+  [ -f "$INSTALL_DIR/$file" ] || return 0
+  raw=$(awk -v want="  $svc:" '
+    $0 == want { inside = 1; next }
+    inside && /^  [a-z]/ { exit }
+    inside && /^ *image:/ { sub(/^ *image: */, ""); print; exit }
+  ' "$INSTALL_DIR/$file")
+  [ -n "$raw" ] || return 0
+  # Only ${VAR:-default} is expanded, and the result has to look like an image
+  # reference before it is used for anything.
+  case "$raw" in *'`'*|*'$('*) return 0 ;; esac
+  resolved=$(eval "printf '%s' \"$raw\"" 2>/dev/null) || return 0
+  case "$resolved" in
+    [A-Za-z0-9]*) printf '%s' "$resolved" ;;
+    *) return 0 ;;
+  esac
+}
+
+# Where a container's loader already looks, so the driver libraries can be put
+# somewhere it will find them.
+#
+# Mounting them under /usr/local/nvidia/lib64 is only half the job: it works
+# for the ollama image because that image puts the directory on
+# LD_LIBRARY_PATH, and it does nothing at all for an image that sets its own —
+# ComfyUI ships a long LD_LIBRARY_PATH of torch's bundled CUDA libraries, and
+# the mounted driver is invisible beside it. The container then reports "found
+# no NVIDIA driver" on a machine whose driver is fine, and restart-loops.
+#
+# So the path is read from the image and prepended to, rather than assumed or
+# replaced. An image that is not pulled yet has nothing to read, and the
+# directory alone is right for that case — no image that sets the variable is
+# missing at this point, because compose pulls before this is used.
+image_library_path() {
+  local image="$1" existing
+  existing=$(podman image inspect "$image" \
+    --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | sed -n 's/^LD_LIBRARY_PATH=//p' | head -1)
+  if [ -n "$existing" ]; then printf '/usr/local/nvidia/lib64:%s' "$existing"
+  else printf '/usr/local/nvidia/lib64'; fi
+}
+
 generate_device_overlay() {
   local out="$INSTALL_DIR/deploy/generated/$1"; shift
-  local libdir dev lib target svc found=0
+  local libdir dev lib target svc found=0 image
   mkdir -p "$INSTALL_DIR/deploy/generated"
   libdir=$(dirname "$(ls -1 /usr/lib/*/libcuda.so.[0-9]* /usr/lib64/libcuda.so.[0-9]* 2>/dev/null | head -1)" 2>/dev/null)
   [ -n "$libdir" ] && [ -d "$libdir" ] || return 1
@@ -128,6 +184,12 @@ generate_device_overlay() {
       echo "  $svc:"
       echo "    security_opt:"
       echo "      - label=disable"
+      # The image each service runs, so its own loader path can be read.
+      image=$(compose_image_for "$svc")
+      if [ -n "$image" ]; then
+        echo "    environment:"
+        echo "      LD_LIBRARY_PATH: $(image_library_path "$image")"
+      fi
       echo "    devices:"
       for dev in /dev/nvidia[0-9]* /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
         [ -e "$dev" ] && echo "      - $dev:$dev"
@@ -299,13 +361,27 @@ fi
 
 ask_yn AUDIO_ENABLED "Add audio generation (Kokoro text to speech, ~1.5 GB)?" "${AUDIO_ENABLED:-n}"
 if [ "$AUDIO_ENABLED" = y ]; then
-  # The GPU image will not start without a CUDA device to find, and the
-  # failure is a long way from its cause. On a machine with no GPU the CPU
-  # build is not a compromise — Kokoro is 82M parameters and generates faster
-  # than real time on a few cores.
-  if [ "$GPU_KIND" = nvidia ]; then KOKORO_IMAGE="ghcr.io/remsky/kokoro-fastapi-gpu:latest"
-  else KOKORO_IMAGE="ghcr.io/remsky/kokoro-fastapi-cpu:latest"
-       note "no NVIDIA GPU, so the CPU build — which is the right one for a model this small"; fi
+  # The CPU build, unless the card is one the GPU build's torch was actually
+  # built for. Kokoro is 82M parameters and generates faster than real time on
+  # a few cores, so the CPU build is not a compromise — while the GPU build on
+  # a card newer than its torch loads the model and then dies on the first
+  # kernel with "no kernel image is available for execution on the device",
+  # which is a long way from its cause and restart-loops for ever.
+  #
+  # Compute capability is what decides it: a prebuilt wheel carries kernels for
+  # the architectures it was compiled against, and a newer card is not one of
+  # them. 12.0 is Blackwell, which wants CUDA 12.8 at the earliest.
+  KOKORO_IMAGE="ghcr.io/remsky/kokoro-fastapi-cpu:latest"
+  if [ "$GPU_KIND" = nvidia ]; then
+    cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' .')"
+    if [ -n "$cap" ] && [ "$cap" -ge 120 ] 2>/dev/null; then
+      note "this card is too new for the GPU build's CUDA, so the CPU build — which for 82M parameters is the right one anyway"
+    else
+      KOKORO_IMAGE="ghcr.io/remsky/kokoro-fastapi-gpu:latest"
+    fi
+  else
+    note "no NVIDIA GPU, so the CPU build — which is the right one for a model this small"
+  fi
 fi
 
 PERCH_SERVICES="chat"

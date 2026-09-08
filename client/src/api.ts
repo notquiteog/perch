@@ -95,9 +95,15 @@ export interface VoiceStatus {
 
 export interface Throughput { current: number; last: number; average: number; ttftMs: number | null; generations: number; totalTokens: number }
 
+export type TunnelProblem =
+  | 'host-key-changed' | 'key-rejected' | 'forward-refused' | 'host-unknown' | 'unreachable';
+
 export interface ConnectionStatus {
   id: string; configured: boolean; hasKey: boolean;
   active: string; enabled: string; since: string; retired: boolean;
+  /** Why it is not up, when ssh said so plainly, and that in a sentence. */
+  problem: TunnelProblem | '';
+  problemSays: string;
 }
 
 export type ServiceId = 'chat' | 'voice' | 'image' | 'video' | 'audio';
@@ -238,6 +244,9 @@ export const api = {
   updateConnection: (id: string, body: Partial<Connection>) =>
     request<{ connection: Connection; applied: { ok: boolean; output: string } }>(`/api/connections/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   connectionKey: (id: string) => request<{ publicKey: string }>(`/api/connections/${id}/key`, { method: 'POST' }),
+  hostKeys: (id: string) => request<{ hostKeys: string }>(`/api/connections/${id}/hostkey`),
+  acceptHostKey: (id: string) =>
+    request<{ connection: Connection; output: string }>(`/api/connections/${id}/hostkey`, { method: 'POST' }),
   pairConnection: (id: string, text: string) => request<{
     connection: Connection; token: string | null; hasExistingToken: boolean;
     steps: Record<string, { ok: boolean; output: string }>;

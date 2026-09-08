@@ -32,7 +32,9 @@ export interface Gpu {
   powerW: number | null;
 }
 
-export interface UnitState { unit: string; active: string; enabled: string; since: string }
+// `reason` is why a unit is not up, for the units that can say. Only the
+// tunnels fill it in, and only when they are not running.
+export interface UnitState { unit: string; active: string; enabled: string; since: string; reason?: string }
 
 export interface HostStatus {
   at: string;
@@ -80,6 +82,11 @@ export type HostAction =
   | 'boot.enable' | 'boot.disable'
   | 'tunnel.start' | 'tunnel.stop' | 'tunnel.restart' | 'tunnel.enable' | 'tunnel.disable'
   | 'tunnel.logs' | 'tunnel.keygen' | 'tunnel.configure' | 'tunnel.remove'
+  // hostkey reports what the far side offers against what is on file;
+  // rehost forgets the entry on file so the next connection learns the
+  // current key. Two actions rather than one, because accepting a changed
+  // host key without looking at it is the thing worth not automating.
+  | 'tunnel.hostkey' | 'tunnel.rehost'
   // env.get reads a setting back from .env. The console cannot see that file
   // — it only has the environment its own container was created with, which
   // goes stale as soon as a setting changes without perch being recreated.

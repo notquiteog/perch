@@ -29,7 +29,11 @@
 # card, though video generation on a CPU is measured in hours.
 services:
   comfy:
-    image: ${COMFY_IMAGE:-docker.io/yanwk/comfyui-boot:cu126-slim}
+    # cu130, not cu126. A card newer than the CUDA the image was built
+    # against loads and then fails on the first kernel — ComfyUI's own
+    # warning is "you need pytorch with cu130 or higher", and on a 50-series
+    # card the cu126 image restart-loops rather than starting.
+    image: ${COMFY_IMAGE:-docker.io/yanwk/comfyui-boot:cu130-slim}
     restart: unless-stopped
     environment:
       # Appended to `main.py --listen --port 8188`. --disable-auto-launch

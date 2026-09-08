@@ -233,6 +233,9 @@ function ConnectionCard({ c, open, busy, onToggle, onRun, setMessage, available 
 }) {
   const [paste, setPaste] = useState('');
   const [newToken, setNewToken] = useState<string | null>(null);
+  // Only fetched when asked for: it reaches out to the far side, and a status
+  // card that did that on every render would be a port scan on a timer.
+  const [hostKeys, setHostKeys] = useState<string | null>(null);
   const [edit, setEdit] = useState({
     host: c.host, sshPort: c.sshPort, user: c.user, remotePort: c.remotePort,
     torProxy: c.torProxy, services: c.services ?? ['chat'],
@@ -270,7 +273,41 @@ function ConnectionCard({ c, open, busy, onToggle, onRun, setMessage, available 
           {!running && (
             <Notice tone="bad">
               These are the right values, but the tunnel is <strong>{c.status.active}</strong> — Tern
-              cannot reach them until it is running. Use Recent log below to see why.
+              cannot reach them until it is running.{' '}
+              {c.status.problemSays || 'Use Recent log below to see why.'}
+              {/* Both of the failures that follow a changed key stay broken until
+                  somebody acts, and Restart=always makes a hopeless tunnel look
+                  exactly like one that is about to come up. So the fix is offered
+                  here rather than left in the log. */}
+              {c.status.problem === 'host-key-changed' && (
+                <div style={{ marginTop: 8 }}>
+                  <button disabled={busy !== null}
+                    onClick={() => void onRun(k('hk'), async () => {
+                      setHostKeys((await api.hostKeys(c.id)).hostKeys);
+                    })}>
+                    {busy === k('hk') ? <Spinner /> : 'Compare fingerprints'}
+                  </button>
+                  {hostKeys && (
+                    <>
+                      <CodeBlock text={hostKeys} wrap />
+                      <p className="hint">
+                        Accept only if the fingerprint the far side offers is one you can confirm
+                        on that machine — <span className="mono">ssh-keygen -lf
+                        /etc/ssh/ssh_host_ed25519_key.pub</span> there. A key that changed without
+                        the machine being rebuilt is what interception looks like.
+                      </p>
+                      <button disabled={busy !== null}
+                        onClick={() => {
+                          if (!confirm(`Forget the host key on file for ${c.host}?\n\nThe tunnel will accept whatever that address offers on its next connection. Only do this if you have checked the fingerprint above.`)) return;
+                          void onRun(k('rehost'), () => api.acceptHostKey(c.id),
+                            'Old host key forgotten. The tunnel will learn the current one.');
+                        }}>
+                        {busy === k('rehost') ? <Spinner /> : 'Accept the new host key'}
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
             </Notice>
           )}
           {c.ternUrls.map((u) => (
