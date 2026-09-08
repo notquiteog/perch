@@ -8,15 +8,37 @@ import os from 'node:os';
 import path from 'node:path';
 
 // A stand-in for Ollama, and a state directory that goes away with the test.
-const upstreamCalls: Array<{ method: string; url: string; auth?: string }> = [];
+const upstreamCalls: Array<{ method: string; url: string; auth?: string; body?: string }> = [];
 const upstream = http.createServer((req, res) => {
-  upstreamCalls.push({ method: req.method!, url: req.url!, auth: req.headers.authorization });
+  const call: { method: string; url: string; auth?: string; body?: string } = {
+    method: req.method!, url: req.url!, auth: req.headers.authorization,
+  };
+  upstreamCalls.push(call);
   if (req.url === '/api/chat') {
-    // Ollama's shape: one JSON object per line, one token each.
-    res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
-    res.write('{"message":{"content":"one"},"done":false}\n');
-    res.write('{"message":{"content":"two"},"done":false}\n');
-    res.end('{"done":true}\n');
+    // The body is collected so the translation tests can assert what Ollama
+    // was actually asked for. It is read to the end before answering, which
+    // is also what a real Ollama does.
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      call.body = Buffer.concat(chunks).toString('utf8');
+      // A non-streaming request gets one object; a streaming one gets Ollama's
+      // shape — one JSON object per line, one token each.
+      let stream = true;
+      try { stream = JSON.parse(call.body).stream !== false; } catch { /* the pipe tests send their own */ }
+      if (!stream) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          message: { content: 'hello there' }, done: true, done_reason: 'stop',
+          prompt_eval_count: 11, eval_count: 2,
+        }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+      res.write('{"message":{"content":"one"},"done":false}\n');
+      res.write('{"message":{"content":"two"},"done":false}\n');
+      res.end('{"done":true,"done_reason":"stop","eval_count":2}\n');
+    });
     return;
   }
   res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -187,6 +209,125 @@ test('a streamed answer arrives in pieces, and its tokens are counted without be
   // Three NDJSON lines went through, so three tokens were counted.
   const t = throughput();
   assert.equal(t.totalTokens, 3);
+});
+
+// ── The Anthropic shape ────────────────────────────────────────────────────
+//
+// The only routes perch translates rather than pipes. These go through the
+// real proxy, so they are also the check that a translated route is still
+// behind the token, the allowlist and the concurrency backstop — the four
+// things the pipe's guarantees do not automatically extend to.
+
+test('the Messages API is behind the same token as everything else', async () => {
+  resetAuthFailures();
+  upstreamCalls.length = 0;
+  const res = await call('/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'test', max_tokens: 16, messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  assert.equal(res.status, 401);
+  assert.equal(upstreamCalls.length, 0, 'an unauthenticated request reached Ollama');
+  resetAuthFailures();
+});
+
+test('a non-streaming request is translated both ways', async () => {
+  resetAuthFailures();
+  upstreamCalls.length = 0;
+  const res = await call('/v1/messages', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${useToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'test',
+      max_tokens: 16,
+      system: 'be brief',
+      stream: false,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+    }),
+  });
+  assert.equal(res.status, 200);
+
+  // What Ollama was asked for: its own shape, with the system prompt folded
+  // back into the message list and max_tokens become num_predict.
+  const sent = JSON.parse(upstreamCalls.at(-1)!.body!);
+  assert.equal(upstreamCalls.at(-1)!.url, '/api/chat');
+  assert.deepEqual(sent.messages, [
+    { role: 'system', content: 'be brief' },
+    { role: 'user', content: 'hi' },
+  ]);
+  assert.equal(sent.options.num_predict, 16);
+  // And the caller's token stopped here, exactly as on a piped route.
+  assert.equal(upstreamCalls.at(-1)!.auth, undefined);
+
+  // What the caller got back: Anthropic's envelope, not Ollama's.
+  const body = await res.json() as Record<string, any>;
+  assert.equal(body.type, 'message');
+  assert.equal(body.role, 'assistant');
+  assert.match(body.id, /^msg_/);
+  assert.deepEqual(body.content, [{ type: 'text', text: 'hello there' }]);
+  assert.equal(body.stop_reason, 'end_turn');
+  assert.deepEqual(body.usage, { input_tokens: 11, output_tokens: 2 });
+});
+
+test('a streamed request arrives as a well-formed SSE sequence', async () => {
+  resetAuthFailures();
+  resetMetrics();
+  const res = await call('/v1/messages', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${useToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'test', max_tokens: 16, stream: true,
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/);
+  const text = await res.text();
+  const types = text.split('\n\n').filter(Boolean)
+    .map((b) => JSON.parse(b.split('\n').find((l) => l.startsWith('data: '))!.slice(6)).type);
+  // The grammar, in order: a client that meets a delta for a block it was
+  // never told about throws rather than rendering partial output.
+  assert.deepEqual(types, [
+    'message_start', 'content_block_start', 'content_block_delta', 'content_block_delta',
+    'content_block_stop', 'message_delta', 'message_stop',
+  ]);
+  assert.match(text, /"one"/);
+  assert.match(text, /"two"/);
+  // A translated generation is still measured. It counts what Ollama reported
+  // rather than newlines, because there are no newlines to count once the
+  // answer has become SSE.
+  assert.equal(throughput().totalTokens, 2);
+});
+
+test('the required fields are required, and refused in Anthropic\'s error envelope', async () => {
+  resetAuthFailures();
+  upstreamCalls.length = 0;
+  for (const body of [{ max_tokens: 16, messages: [] }, { model: 'test', messages: [] }]) {
+    const res = await call('/v1/messages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${useToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    assert.equal(res.status, 400);
+    // The envelope a client's error handling reads. A bare `{error: "..."}`
+    // is not something it can classify.
+    const j = await res.json() as Record<string, any>;
+    assert.equal(j.type, 'error');
+    assert.equal(j.error.type, 'invalid_request_error');
+  }
+  assert.equal(upstreamCalls.length, 0, 'an invalid request still reached Ollama');
+});
+
+test('count_tokens answers rather than 404ing, because a client uses it to decide', async () => {
+  resetAuthFailures();
+  const res = await call('/v1/messages/count_tokens', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${useToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'test', messages: [{ role: 'user', content: 'hello world' }] }),
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json() as { input_tokens: number };
+  assert.ok(body.input_tokens > 0);
 });
 
 test('an oversized body is refused on the header, before any of it is read', async () => {

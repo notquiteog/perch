@@ -3,7 +3,7 @@
 //
 //   * the console, on loopback, which can do everything;
 //   * the model endpoint, which the tunnel carries to the Tern box, and which
-//     can do exactly the fourteen things in proxy.ts and nothing else.
+//     can do exactly the things listed in services.ts and nothing else.
 //
 // They are separate sockets so that exposing the second never exposes the
 // first. Nothing about the tunnel gives anyone a route to the console.

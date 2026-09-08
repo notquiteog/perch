@@ -41,11 +41,14 @@ its own allowlist, and one SSH session carries whichever you enable. They share
 a GPU, so the console adds up what they want and tells you when the set will
 not fit — see [docs/SERVICES.md](docs/SERVICES.md).
 
-**A model endpoint anything can use.** An Ollama-compatible API that requires a
-bearer token, exposing exactly the fourteen endpoints a client actually calls
-and refusing everything else — and, for the other services, the OpenAI shapes
-their clients are already written against. Streaming passes straight through,
-so answers still appear token by token.
+**A model endpoint anything can use.** An API that requires a bearer token,
+exposing exactly the endpoints a client actually calls and refusing everything
+else. Chat answers all three shapes a client is likely to be written against —
+Ollama's own, OpenAI's `/v1`, and Anthropic's `/v1/messages` — and the other
+services speak the OpenAI shapes their clients already expect. Streaming
+passes straight through, so answers still appear token by token; the two
+Anthropic routes are the one exception and are translated rather than piped,
+which [docs/SERVICES.md](docs/SERVICES.md) explains in full.
 
 **Containers you can size.** Each one has a memory and CPU ceiling you set from
 the console. They are written into `.env`, which compose reads when it

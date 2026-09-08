@@ -32,7 +32,8 @@ is another claim on the same GPU.
 Three of the five have no use in Tern at all, and that is the point rather than
 an oversight: perch is a model host that Tern happens to be a client of. The
 endpoints are ordinary HTTP with a bearer token, and the shapes are the ones a
-client is likely to be written against already — Ollama's and OpenAI's.
+client is likely to be written against already — Ollama's, OpenAI's and
+Anthropic's.
 
 ## Why one app rather than five
 
@@ -113,6 +114,59 @@ it, and the other pays a load.
 **Dictation runs perfectly well on the CPU.** For clips of a sentence or two,
 on a machine with cores to spare, that is the right answer — it leaves the
 whole card for the writing model.
+
+## Chat
+
+Ollama, behind the token. It answers three wire shapes, because a client is
+almost always already written against one of them:
+
+| Shape | Paths |
+|---|---|
+| Ollama's own | `/api/chat`, `/api/generate`, `/api/embed`, `/api/tags`, `/api/show`, `/api/ps`, `/api/version` |
+| OpenAI's | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models` |
+| Anthropic's | `/v1/messages`, `/v1/messages/count_tokens` |
+
+The first two are Ollama's own doing — it serves both, so perch pipes them
+through and never looks inside. The third is not: Ollama does not speak the
+Messages API, so `server/src/anthropic.ts` translates it.
+
+### What the translated route costs, and what it does not
+
+`proxy.ts` opens by saying it is a pipe and not a parser, and every privacy
+property it claims follows from that: bodies stream through, so perch never
+holds anybody's prompt. A translator cannot keep that promise — it has to read
+the request to rewrite it. So the promise is narrowed rather than quietly
+broken, and the narrowing is worth stating plainly:
+
+- Only `/v1/messages` and `/v1/messages/count_tokens` are affected. Everything
+  else on this service, and all four other services, are still piped.
+- The request body is read under a hard ceiling and dropped when the response
+  ends. Nothing is written anywhere and nothing is logged: the activity ring
+  records the path and the byte count exactly as it does for a piped request.
+- The **response** is still streamed. Ollama's lines are translated one at a
+  time as they arrive, so a long generation still arrives token by token and
+  the whole answer is never assembled in memory.
+- The token, the scope, the block list, the size ceiling and the concurrency
+  backstop all run first, unchanged. A translated route is marked `translated`
+  in the route table in `server/src/services.ts` so this is a list rather than
+  something to remember.
+
+### What does not survive the crossing
+
+- **`count_tokens` is an estimate.** Ollama exposes no tokeniser, so there is
+  nothing to proxy. Answering approximately beats answering 404: a client uses
+  this to decide whether a conversation still fits, and one that cannot ask
+  usually assumes it does and fails on the real request instead.
+- **Server-side tools are dropped.** `web_search` and friends are Anthropic's
+  to run, and this is not Anthropic. Defining one for the model would give it a
+  tool nothing can answer and deadlock the conversation on a result that never
+  comes; a dropped one just means the model does not call it.
+- **Image blocks must be base64.** A URL source is not something Ollama can
+  fetch, so it is not forwarded as though it were.
+
+Everything else crosses: the system prompt (lifted back into the message list),
+tool definitions and tool results, `max_tokens` as `num_predict`, temperature,
+top-p, top-k, stop sequences, and `thinking` as Ollama's `think`.
 
 ## Dictation
 

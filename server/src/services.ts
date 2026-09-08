@@ -21,6 +21,15 @@ export interface Route {
   generating?: boolean;
   /** Needs the 'manage' scope rather than 'use'. */
   manage?: boolean;
+  /**
+   * Answered by a translator rather than piped upstream.
+   *
+   * Everything else here is a straight pipe: perch never sees the body. A
+   * translated route is the exception and the flag is deliberately explicit,
+   * so the one property the proxy's header comment claims for the whole file
+   * can be checked against a list rather than remembered.
+   */
+  translated?: boolean;
 }
 
 export interface ServiceDef {
@@ -57,12 +66,12 @@ export const SERVICES: ServiceDef[] = [
   {
     id: 'chat',
     label: 'Chat',
-    blurb: 'The language model. Ollama behind an authenticated endpoint, speaking both its own API and OpenAI’s, so anything that talks to either can use it — Tern’s composer included.',
+    blurb: 'The language model. Ollama behind an authenticated endpoint, speaking its own API, OpenAI’s and Anthropic’s, so anything written against any of the three can use it — Tern’s composer included.',
     port: config.proxyPort,
     upstream: config.ollamaUrl,
     overlay: null, // always in the base compose file
     container: 'ollama',
-    speaks: 'Ollama’s API, and OpenAI’s /v1 chat, completions and embeddings',
+    speaks: 'Ollama’s API, OpenAI’s /v1 chat, completions and embeddings, and Anthropic’s /v1/messages',
     ternField: 'Admin → AI model → Base URL',
     // Everything Tern asks Ollama for, and nothing else. Ollama's own API is
     // wider than this — /api/create, /api/push and the blob endpoints can
@@ -82,6 +91,14 @@ export const SERVICES: ServiceDef[] = [
       { method: 'POST', path: '/v1/chat/completions', generating: true },
       { method: 'POST', path: '/v1/completions', generating: true },
       { method: 'POST', path: '/v1/embeddings' },
+      // The two Anthropic-shaped routes. Unlike every other entry in this
+      // table these are NOT piped to Ollama — Ollama does not serve this
+      // shape, so `anthropic.ts` translates them. They are listed here anyway
+      // because this table is what decides the token, the scope, the
+      // concurrency backstop and the activity ring, and a route that skipped
+      // it would skip all four.
+      { method: 'POST', path: '/v1/messages', generating: true, translated: true },
+      { method: 'POST', path: '/v1/messages/count_tokens', translated: true },
     ],
   },
   {
