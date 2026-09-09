@@ -175,27 +175,50 @@ test('no outbound call is written without a proxy or a stated reason', () => {
 test('every exemption says why, in words', () => {
   // An exemption with no reason is one nobody can review, and the next person
   // to read it will assume it was load-bearing.
-  const thin = everyCall()
-    .filter((c) => EXEMPT.test(c.leading))
+  const exempted = everyCall().filter((c) => EXEMPT.test(c.leading));
+  // The positive control, and it is not decoration. Without it this check
+  // passes when `EXEMPT` stops matching, when `leading` stops finding the
+  // comment block, and when nothing was scanned at all — because in every one
+  // of those cases the list below is empty and an empty list is what "clean"
+  // looks like. Any assertion whose expected result is absence is
+  // indistinguishable from not running unless something in the same test
+  // proves it ran.
+  assert.ok(exempted.length >= 3, `only ${exempted.length} exemptions found, and this repository has four — the exemption scan has stopped working, and this check would report clean on that`);
+
+  const thin = exempted
     .filter((c) => (/transport-exempt:([\s\S]*)/.exec(c.leading)?.[1] ?? '').replace(/\/\/|\s+/g, ' ').trim().length < 40)
     .map((c) => `${c.file}:${c.line}`);
   assert.deepEqual(thin, [], `an exemption has no usable reason on it: ${thin.join(', ')}`);
 });
 
-test('a call named in prose or quoted in a string is not a call', () => {
-  // The false-positive class the text scan had, asserted rather than assumed.
-  // Both shapes appear in this repository for real, which is the whole reason
-  // the walk replaced the grep.
+test('prose and strings are not calls, and real calls beside them still are', () => {
+  // The false-positive class the text scan had, asserted rather than assumed:
+  // both decoy shapes appear in this repository for real, which is the whole
+  // reason the walk replaced the grep.
+  //
+  // The decoys and the real calls share one fixture ON PURPOSE, and the
+  // assertion names exactly which lines come back. Testing the decoys alone
+  // would be an assertion that a list is empty — which is also what happens if
+  // the file was never written, if `callsIn` throws nothing and finds nothing,
+  // or if the walk stopped recognising calls entirely. Absence cannot tell
+  // those apart from success. Together, neither half can pass by absence: if
+  // the scan never read the file the real calls are missing, and if a decoy
+  // trips there is an extra one.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'perch-guard-'));
   const file = path.join(dir, 'sample.ts');
   try {
     fs.writeFileSync(file, [
-      '// `fetch` cannot be given an http.Agent; its dispatcher is undici’s.',
-      'const doc = `call http.request({ agent }) to reach it`;',
-      "const name = 'fetch(';",
-      'export const x = doc + name;',
+      '// `fetch` cannot be given an http.Agent; its dispatcher is undici’s.',   // 1
+      'const doc = `call http.request({ agent }) to reach it`;',                 // 2
+      "const name = 'fetch(';",                                                  // 3
+      'export async function real(u: string) { return fetch(u); }',              // 4
+      "export function realToo() { return http.request({ host: 'x' }); }",       // 5
     ].join('\n'));
-    assert.deepEqual(callsIn(file), [], 'prose or a string literal was read as a call');
+    assert.deepEqual(
+      callsIn(file).map((c) => `${c.line}:${c.callee}`),
+      ['4:fetch', '5:http.request'],
+      'the decoys on lines 1-3 must not be read as calls, and the real ones on 4-5 must be',
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
