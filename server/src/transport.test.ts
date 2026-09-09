@@ -28,14 +28,51 @@ import url from 'node:url';
 
 const here = path.dirname(url.fileURLToPath(import.meta.url));
 
+
+/**
+ * The source tree, found rather than assumed.
+ *
+ * A guard anchored on its own file's location scans the wrong directory the
+ * moment the tests are compiled: `npm test` builds to `dist-test/`, which
+ * contains no `.ts` files at all, so `readdirSync(here)` returned an empty
+ * list and every check below passed by having nothing to look at. It was green
+ * in the suite and red only when run against the sources directly.
+ *
+ * That is the worst failure mode a guard can have — not wrong, but vacuous —
+ * so `sources()` asserts it found something, and this walks up to the real
+ * `src` wherever the compiled copy happens to be run from.
+ */
+function srcRoot(): string {
+  let dir = here;
+  for (let i = 0; i < 6; i++) {
+    if (path.basename(dir) === 'src') return dir;
+    const candidate = path.join(dir, 'src');
+    if (fs.existsSync(candidate)) return candidate;
+    dir = path.dirname(dir);
+  }
+  throw new Error(`cannot find the source tree to scan, starting from ${here}`);
+}
+
 function sources(): string[] {
-  return fs.readdirSync(here)
+  const dir = srcRoot();
+  const found = fs.readdirSync(dir)
     .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
-    .map((f) => path.join(here, f));
+    .map((f) => path.join(dir, f));
+  // A guard that scans nothing must fail, not pass.
+  assert.ok(found.length > 5, `only ${found.length} sources found under ${dir} — the scan is looking in the wrong place`);
+  return found;
 }
 
 /** Anything that opens a socket to somewhere else. */
-const OUTBOUND = /(?:^|[^.\w])fetch\(|https?\.request\(|\bmod\.request\(/;
+/**
+ * Anything that opens a socket, in any library.
+ *
+ * The last three are here even though perch has no runtime dependencies and so
+ * cannot currently use any of them — which is the point. A guard you can step
+ * around by reaching for a different library is not a guard, and the moment
+ * somebody adds one is exactly the moment they will not think to widen this.
+ */
+const OUTBOUND = /(?:^|[^.\w])fetch\(|https?\.request\(|\bmod\.request\(|\baxios\b|\bundici\b|\bgot\(/;
 
 const EXEMPT = /\/\/\s*transport-exempt:/;
 
@@ -44,6 +81,12 @@ test('no outbound call is written without a proxy or a stated reason', () => {
   for (const file of sources()) {
     const lines = fs.readFileSync(file, 'utf8').split('\n');
     lines.forEach((line, i) => {
+      // A comment is prose about a call, not a call. Several files explain at
+      // length why `fetch` cannot take an agent, or which library does what,
+      // and flagging those would make the check cry wolf — which is how a
+      // check gets deleted rather than fixed.
+      const code = line.trim();
+      if (code.startsWith('//') || code.startsWith('*') || code.startsWith('/*')) return;
       if (!OUTBOUND.test(line)) return;
       // The exemption may sit on the line itself or anywhere in the comment
       // block immediately above it. Only the line above is not enough: the
