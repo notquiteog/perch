@@ -11,6 +11,7 @@
 // Each is off unless switched on. A machine that only writes email should not
 // have an image generator listening on it.
 import { config } from './config.js';
+import { FLOOR_BYTES } from './system.js';
 
 export type ServiceId = 'chat' | 'voice' | 'video' | 'audio';
 
@@ -304,7 +305,12 @@ export function serviceById(id: ServiceId): ServiceDef {
  * cost of the smallest sensible model for each, not the largest.
  */
 export const SERVICE_VRAM_HINT: Record<ServiceId, number> = {
-  chat: 9.4e9,   // qwen3.5:9b and up; the Models page is the real answer
+  // The floor, not a guess: FLOOR_BYTES is derived from the catalogue entry
+  // for qwen3.5:9b, so this figure moves when the floor does instead of being
+  // a literal that quietly disagrees with it. install.sh carries the same
+  // number as FLOOR_MB. The Models page is still the real answer for any
+  // particular model.
+  chat: FLOOR_BYTES,
   voice: 1.0e9,  // whisper small; base is about 0.4 GB
   // One container now covers images, video and music, and this is the video
   // figure because video is the expensive one: a 5B model and its text encoder,

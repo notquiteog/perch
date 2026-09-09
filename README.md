@@ -132,6 +132,60 @@ ISP outage does not leave it given up by morning.
 
 ---
 
+## What this is built for
+
+Three statements, because "it works on my machine" is not a target.
+
+### The floor: what a client's feature may assume
+
+**Chat: `qwen3.5:9b` or `gemma4:12b`. Embeddings: `qwen3-embedding:4b`.**
+
+perch has no AI features of its own — it hosts models for
+[Tern](https://github.com/notquiteog/tern), cryptostore and roost, whose
+features *are* built and tested against that minimum. Below it, things do not
+get slower, they go quietly wrong: a model without a reliable `tools`
+capability answers questions perfectly and never calls the tool that sets the
+alert or files the draft, with no error anywhere. A 384-wide embedder misses
+exactly the paraphrases meaning search exists to catch.
+
+**It is a warning, never a wall.** The installer sizes a model to whatever box
+it finds, says plainly what a sub-floor pick will not do, and then offers it
+anyway. `./bin/perch pull-model` takes any tag. If you want `qwen3:1.7b` on a
+4 GB box to see how far it gets, that is yours to decide — what the floor
+governs is what a **feature** may assume, not what an **operator** may install.
+
+`docs/TERN.md` is the measured table, and the one the other projects point at.
+
+### The ceiling: frontier models, thinking on
+
+A first-class target, not a happy accident. `PERCH_CHAT_UPSTREAM_API` puts the
+token, the allowlist, the per-service proxy and the activity ring in front of a
+*hosted* API instead of the local Ollama, so a client can reach a frontier model
+through the same endpoint, the same tunnel and the same controls.
+
+Nothing in perch flattens what comes back. Reasoning is translated as its own
+channel in `shapes.ts` rather than folded into the answer, and a model that
+deliberates for a minute before its first token is a supported shape rather
+than a timeout. That path has no floor at all.
+
+### The two deployments, both first-class
+
+**The intended one: a strong bare-metal app server, and the models over here.**
+The client scales on its own machine — vertically, or horizontally behind one
+database — and reaches models on a separate AI box or a provider API. This is
+the shape perch exists for, and the whole of the diagram above.
+
+**The other one: a single 16 GB+ VPS running everything.** One operator, one
+box, local models only, no third party — Ollama, whisper, Kokoro, a vector
+store, Postgres, nginx and the app together. perch is not required for that
+shape and is not the right tool inside it; the client's own installer covers
+it. It is supported, and 16 GB is a real floor rather than a comfortable one:
+a floor chat model is ~6 GB resident, `qwen3-embedding:4b` ~2.5 GB, whisper
+`base` plus Kokoro ~1.9 GB, and the datastores and app ~1 GB — about 11.5 GB
+with everything warm. That leaves headroom on 16 GB and none at all on 8.
+
+---
+
 ## Before you start
 
 On the machine with the GPU:

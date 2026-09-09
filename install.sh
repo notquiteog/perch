@@ -284,6 +284,32 @@ fi
 step "Sizing"
 if [ "$VRAM_MB" -gt 1024 ]; then USABLE_MB=$(( VRAM_MB * 9 / 10 )); BASIS="the GPU"
 else USABLE_MB=$(( RAM_KB / 1024 * 2 / 3 )); BASIS="system memory"; fi
+# ---------- The floor ----------
+#
+# The memory a machine needs before it can run a model the CLIENTS' features
+# are built and tested against: qwen3.5:9b or gemma4:12b for chat, plus
+# qwen3-embedding:4b for meaning search. perch has no AI features of its own;
+# it hosts models for Tern, cryptostore and roost, and this is the line under
+# which those go quietly wrong rather than slowly.
+#
+# Quietly is the word that matters. A model below this does not answer more
+# slowly — it answers questions perfectly well and never calls the tool that
+# sets the alert, files the draft or writes the entry, with no error anywhere
+# for anyone to find.
+#
+# It is a warning, never a wall: pick_model still goes all the way down, every
+# model stays installable, and somebody who wants a small model on a small box
+# is making a decision that is theirs to make. What the floor governs is what a
+# FEATURE may assume, not what an operator may install.
+#
+# 9400 = qwen3.5:9b's needsBytes in server/src/system.ts (FLOOR_BYTES), which is
+# the 6.59 GB download plus room for the context window and a second slot.
+# services.ts reads the same figure from FLOOR_BYTES rather than repeating it;
+# this copy exists because the installer runs before there is any TypeScript to
+# ask. Change one, change both.
+FLOOR_MB=9400
+FLOOR_EMBED_MB=3400   # qwen3-embedding:4b, resident, beside the chat model
+
 # Mirrors MODELS in server/src/system.ts — keep the two in step. The
 # thresholds are "needs to run well", which is the download plus room for the
 # context window, not the download alone.
@@ -292,13 +318,24 @@ pick_model() {
   if   [ "$mb" -ge 25400 ]; then echo "gemma4:31b"
   elif [ "$mb" -ge 22800 ]; then echo "qwen3.8:27b"
   elif [ "$mb" -ge 10600 ]; then echo "gemma4:12b"
-  elif [ "$mb" -ge 9400  ]; then echo "qwen3.5:9b"
+  elif [ "$mb" -ge "$FLOOR_MB" ]; then echo "qwen3.5:9b"
   elif [ "$mb" -ge 5600  ]; then echo "qwen3.5:4b"
   else echo "qwen3.5:2b"; fi
 }
 SUGGESTED_MODEL=$(pick_model "$USABLE_MB")
 note "${USABLE_MB} MB usable, judged from $BASIS"
 ok "suggested model: $SUGGESTED_MODEL"
+# Said plainly, and then the install carries on and offers it anyway.
+if [ "$USABLE_MB" -lt "$FLOOR_MB" ]; then
+  warn "$SUGGESTED_MODEL is below the floor the clients' AI features are tested against"
+  note "that floor is qwen3.5:9b or gemma4:12b, which want about ${FLOOR_MB} MB"
+  note "$SUGGESTED_MODEL will answer questions. It will NOT reliably call tools, so"
+  note "features that act — alerts, drafts saved for you, agent steps — may silently"
+  note "do nothing rather than report an error"
+  note "nothing here stops you: install it, try it, and point a client at a bigger"
+  note "model later without reinstalling. perch can also front a hosted API instead"
+  note "(PERCH_CHAT_UPSTREAM_API), which has no floor at all"
+fi
 # One slot per ~6 GB of usable memory, because each slot costs a context
 # window of KV cache; never fewer than one, and past four the GPU is the limit
 # rather than the slot count.
@@ -323,6 +360,36 @@ ask PERCH_PROXY_PORT   "Model endpoint port (on 127.0.0.1)" "${PERCH_PROXY_PORT:
 ask OLLAMA_NUM_PARALLEL "Requests answered at once" "${OLLAMA_NUM_PARALLEL:-$SLOTS}"
 ask AI_MODEL "Model to download now (blank to choose later in the console)" "${AI_MODEL:-$SUGGESTED_MODEL}"
 
+# The embedding model, which is a separate question because it is a separate
+# claim on the same card: it loads BESIDE the language model rather than
+# instead of it, and stays loaded while anything is searching.
+#
+# It was not asked at all until the floor was written down, which meant every
+# client wanting meaning search had to find the console and know what to pull.
+# qwen3-embedding:4b is what their meaning search is built and tested against;
+# below it, retrieval gets worse on exactly the paraphrases the feature exists
+# to catch, which is a failure nobody sees as a failure.
+EMBED_HEADROOM=$(( USABLE_MB - FLOOR_MB ))
+if [ "$EMBED_HEADROOM" -ge "$FLOOR_EMBED_MB" ]; then
+  EMBED_SUGGESTED="qwen3-embedding:4b"
+else
+  # Not the floor, and said so below. all-minilm is 384-wide with a 512-token
+  # window, so only the opening of a long document reaches the vector.
+  EMBED_SUGGESTED="all-minilm"
+fi
+ask AI_EMBED_MODEL "Embedding model for clients' meaning search (blank to skip)" "${AI_EMBED_MODEL:-$EMBED_SUGGESTED}"
+if [ "$AI_EMBED_MODEL" = "all-minilm" ] || [ "$AI_EMBED_MODEL" = "nomic-embed-text" ]; then
+  warn "$AI_EMBED_MODEL is below the embedding floor (qwen3-embedding:4b)"
+  note "meaning search will work and will retrieve worse on wording that shares no"
+  note "words with what it is searching, which is the case the feature is for"
+fi
+# Worth saying once, here, because it is the one model change that is not free
+# on the client side.
+if [ -n "$AI_EMBED_MODEL" ]; then
+  note "changing this later re-indexes every client that uses it: vectors made by"
+  note "one embedding model are not comparable with another's"
+fi
+
 # The two optional services. Both cost memory on the same card the chat model
 # is using, so they are off unless asked for, and the numbers are stated rather
 # than discovered later when generation mysteriously halves in speed.
@@ -340,8 +407,10 @@ fi
 # later, when generation mysteriously halves the speed of everything else.
 warn_if_tight() {
   local need="$1" what="$2"
-  [ "$USABLE_MB" -lt $(( need + 9400 )) ] || return 0
-  warn "this card has ${USABLE_MB} MB usable; a chat model plus $what wants about $(( need + 9400 )) MB"
+  # "a chat model" here means one at the floor — see FLOOR_MB above. It was a
+  # bare 9400 with no name on it, which is the same number arrived at twice.
+  [ "$USABLE_MB" -lt $(( need + FLOOR_MB )) ] || return 0
+  warn "this card has ${USABLE_MB} MB usable; a chat model plus $what wants about $(( need + FLOOR_MB )) MB"
   note "they will not both stay resident — whichever was used last will hold the card"
   note "the console's Services panel shows the running total"
 }
@@ -557,6 +626,7 @@ OLLAMA_KEEP_ALIVE=10m
 # The model install.sh downloaded, for reference. The console is where you
 # change which one is in use.
 AI_MODEL=$AI_MODEL
+AI_EMBED_MODEL=$AI_EMBED_MODEL
 
 # Compose overlays, colon separated.
 COMPOSE_FILE=$COMPOSE_FILE
@@ -619,6 +689,10 @@ if [ -n "$AI_MODEL" ]; then
   step "Downloading $AI_MODEL"
   note "this is a few gigabytes and takes as long as your line takes"
   compose exec -T ollama ollama pull "$AI_MODEL" || warn "the download did not finish; you can retry from the console"
+fi
+if [ -n "$AI_EMBED_MODEL" ]; then
+  step "Downloading $AI_EMBED_MODEL"
+  compose exec -T ollama ollama pull "$AI_EMBED_MODEL" || warn "the download did not finish; you can retry from the console"
 fi
 
 # ---------- 11. a token ----------

@@ -27,6 +27,15 @@ export interface ModelChoice {
    * still looking maintained.
    */
   current?: boolean;
+  /**
+   * Meets the floor the clients' AI features are built and tested against —
+   * see FLOOR_CHAT and FLOOR_EMBED below. Not a quality score and not a
+   * capacity check: `needsBytes` already says whether a model fits. This says
+   * whether the features on the other end of the tunnel can rely on it.
+   *
+   * Unrelated to `floorBytes` in containers.ts, which is a memory limit.
+   */
+  floor?: boolean;
   note: string;
 }
 
@@ -49,6 +58,42 @@ export interface ModelChoice {
 // is for, and the console lets you install any tag you like.
 const need = (gb: number): number => Math.round(gb * 1.2e9 + 1.5e9);
 
+// ---------- The floor ----------
+//
+// perch is a model host, so it does not have AI features of its own to size.
+// What it has is clients — Tern, cryptostore, roost — whose features ARE built
+// and tested against a stated minimum, and this is where that minimum is
+// written down, because this is the machine that decides which models exist.
+//
+// **Chat: qwen3.5:9b or gemma4:12b. Embedding: qwen3-embedding:4b.**
+//
+// The distinction that makes this worth encoding rather than leaving to a
+// docs paragraph: below the floor, features do not get slower, they silently
+// stop working. A model without a usable `tools` capability answers questions
+// perfectly and never calls the tool that sets the alert, files the draft or
+// writes the entry — with no error anywhere for the operator to find. A 768-
+// wide embedding retrieves worse on exactly the paraphrases meaning search
+// exists to catch. Neither failure shows up as a failure.
+//
+// **It is a warning, never a wall.** Every model in this catalogue stays
+// listed, sized and installable, and `pick_model` in install.sh goes all the
+// way down. Somebody who wants qwen3:1.7b on a 4 GB box to see how far it gets
+// is making a decision that belongs to them; perch's job is to make sure it is
+// an informed one. What the floor governs is what a FEATURE may assume, not
+// what an operator may install.
+//
+// The other end is a first-class target too, and it is not this file's
+// business: a client pointed at a frontier model with thinking enabled should
+// get more out of the same features, which is why perch will front a hosted
+// API (PERCH_CHAT_UPSTREAM_API) rather than only a local Ollama. See README,
+// "What this is built for".
+//
+// When the floor moves it moves here, in `pick_model` in install.sh, and in
+// docs/TERN.md — all three, or perch is recommending something the clients are
+// not tested against.
+export const FLOOR_CHAT = ['qwen3.5:9b', 'gemma4:12b'] as const;
+export const FLOOR_EMBED = 'qwen3-embedding:4b';
+
 // Ordered smallest first; the recommendation relies on that.
 //
 // A note on the nested Gemma builds, because file size misleads here. `e2b`
@@ -60,23 +105,23 @@ const need = (gb: number): number => Math.round(gb * 1.2e9 + 1.5e9);
 export const MODELS: ModelChoice[] = [
   {
     name: 'qwen3.5:2b', current: true, sizeBytes: 2.74e9, needsBytes: need(2.74), params: '2B', contextTokens: 262144,
-    note: 'Runs anywhere, including with no GPU. Shipped at Q8 rather than Q4, so it is larger than its parameter count suggests and correspondingly less lossy. Good for tidying text you wrote; not for drafting unsupervised.',
+    note: 'Runs anywhere, including with no GPU. Shipped at Q8 rather than Q4, so it is larger than its parameter count suggests and correspondingly less lossy. Good for tidying text you wrote; not for drafting unsupervised, and well below the floor for anything that calls tools.',
   },
   {
     name: 'qwen3.5:4b', current: true, sizeBytes: 3.39e9, needsBytes: need(3.39), params: '4B', contextTokens: 262144,
-    note: 'The smallest that writes a whole message or summary without wandering off. Comfortable on a 6–8 GB card.',
+    note: 'The smallest that writes a whole message or summary without wandering off. Comfortable on a 6–8 GB card. Below the floor: fine for drafting and rewriting, but a client that expects it to call tools will find the feature quietly doing nothing.',
   },
   {
-    name: 'qwen3.5:9b', current: true, sizeBytes: 6.59e9, needsBytes: need(6.59), params: '9B', contextTokens: 262144,
-    note: 'The sensible floor for work you would use after a glance rather than a rewrite. Its 262k context means a long document or thread fits without being trimmed, which is worth more than another couple of billion parameters for anything that reads before it writes.',
+    name: 'qwen3.5:9b', current: true, floor: true, sizeBytes: 6.59e9, needsBytes: need(6.59), params: '9B', contextTokens: 262144,
+    note: 'The floor, and the smaller of the two that meet it. Work you would use after a glance rather than a rewrite, and reliable enough at calling tools that a client can build a feature on it. Its 262k context means a long document or thread fits without being trimmed, which is worth more than another couple of billion parameters for anything that reads before it writes.',
   },
   {
     name: 'gemma4:e2b', sizeBytes: 7.16e9, needsBytes: need(7.16), params: '2B effective', contextTokens: null,
     note: 'A nested build: the file holds the whole model but only about 2B parameters activate, so it generates at 2B speed while occupying 7 GB. Fast, not memory-light — pick it for tokens per second, not to save room.',
   },
   {
-    name: 'gemma4:12b', current: true, sizeBytes: 7.56e9, needsBytes: need(7.56), params: '12B', contextTokens: null,
-    note: 'The best value on a 12–16 GB card: a true 12B in a smaller file than gemma4:e4b, which is only 4B effective. Newest Gemma generation.',
+    name: 'gemma4:12b', current: true, floor: true, sizeBytes: 7.56e9, needsBytes: need(7.56), params: '12B', contextTokens: null,
+    note: 'The other model that meets the floor, and the best value on a 12–16 GB card: a true 12B in a smaller file than gemma4:e4b, which is only 4B effective. Newest Gemma generation.',
   },
   {
     name: 'gemma4:e4b', sizeBytes: 9.61e9, needsBytes: need(9.61), params: '4B effective', contextTokens: null,
@@ -154,7 +199,7 @@ export const UNCENSORED_MODELS: ModelChoice[] = [
 export const EMBED_MODELS: ModelChoice[] = [
   {
     name: 'all-minilm', sizeBytes: 0.05e9, needsBytes: 0.3e9, params: '23M', contextTokens: 512,
-    note: 'The usual default, and Tern\u2019s. Tiny, and loads beside a language model without competing for room.',
+    note: 'The small-box option. Tiny, and loads beside a language model without competing for room \u2014 but 384 wide and a 512-token window, so only the opening of a long document reaches the vector. Well below the floor: still selectable, no longer what anything defaults to.',
   },
   {
     name: 'nomic-embed-text', sizeBytes: 0.27e9, needsBytes: 0.6e9, params: '137M', contextTokens: 8192,
@@ -175,8 +220,8 @@ export const EMBED_MODELS: ModelChoice[] = [
   // multiple on every row, so it is a decision about somebody else's disk as
   // well as about this card.
   {
-    name: 'qwen3-embedding:4b', sizeBytes: 2.5e9, needsBytes: 3.4e9, params: '4B', contextTokens: 32768,
-    note: 'Strong multilingual retrieval, 2560-wide vectors, and a 32k input window so a long document embeds whole. Wants the GPU; on CPU a first index pass over a real collection is an overnight job.',
+    name: 'qwen3-embedding:4b', floor: true, sizeBytes: 2.5e9, needsBytes: 3.4e9, params: '4B', contextTokens: 32768,
+    note: 'The floor, and what a client\u2019s meaning search is built and tested against. Strong multilingual retrieval, 2560-wide vectors, and a 32k input window so a long document embeds whole. Wants the GPU; on CPU a first index pass over a real collection is an overnight job.',
   },
   {
     name: 'qwen3-embedding:8b', sizeBytes: 4.7e9, needsBytes: 6.2e9, params: '8B', contextTokens: 32768,
@@ -184,13 +229,34 @@ export const EMBED_MODELS: ModelChoice[] = [
   },
 ];
 
+/**
+ * The memory a machine needs before a floor model will run on it: the smaller
+ * of the two, plus the room `need()` already accounts for. Derived rather than
+ * typed in, so it cannot drift from the catalogue it describes.
+ */
+export const FLOOR_BYTES = Math.min(
+  ...MODELS.filter((m) => m.floor).map((m) => m.needsBytes),
+);
+
 export interface Sizing {
   /** What the recommendation was made from. */
   basis: 'vram' | 'ram';
   usableBytes: number;
   recommended: ModelChoice;
+  /**
+   * The embedding model to run beside it. A second, separate claim on the same
+   * memory — it loads *as well as* the language model, not instead of it — so
+   * it is sized against what is left rather than against the whole card.
+   */
+  recommendedEmbed: ModelChoice;
   /** Everything this machine can run, largest first. */
   fits: ModelChoice[];
+  /**
+   * This machine cannot run either floor model, so a client pointed at it will
+   * have features that silently do not work. Reported, never enforced: perch
+   * still installs whatever is asked for. See FLOOR_CHAT.
+   */
+  belowFloor: boolean;
   /** Context window that will not push the model off the GPU. */
   numCtx: number;
 }
@@ -220,7 +286,24 @@ export function sizing(): Sizing {
   else if (headroom > 3e9) numCtx = 16384;
   else if (headroom < 0.5e9) numCtx = 4096;
 
-  return { basis, usableBytes, recommended, fits, numCtx };
+  // The embedding model competes with the language model for the same memory,
+  // so it is sized from the headroom and not from the card. Largest that fits
+  // beside it, preferring the floor model; the smallest in the catalogue if
+  // nothing does, because meaning search with a weak embedder still beats a
+  // client falling back to substring matching.
+  const embedFits = EMBED_MODELS.filter((m) => m.needsBytes <= headroom);
+  const recommendedEmbed =
+    embedFits.find((m) => m.floor) ?? embedFits[embedFits.length - 1] ?? EMBED_MODELS[0]!;
+
+  return {
+    basis,
+    usableBytes,
+    recommended,
+    recommendedEmbed,
+    fits,
+    belowFloor: usableBytes < FLOOR_BYTES,
+    numCtx,
+  };
 }
 
 /** Bytes, for a person. */

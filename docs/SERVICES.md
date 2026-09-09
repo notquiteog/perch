@@ -83,11 +83,17 @@ local models are useless. One process can see the whole picture.
 ## They do not all fit
 
 This is the part worth reading before switching everything on. Rough resident
-cost:
+cost.
+
+This is a table about what fits *alongside* what. **Which chat model to pick is
+not decided here** — `docs/TERN.md` has the measured table and the floor, and a
+second copy of it would be a copy that rots. `gemma4:12b` stands in below
+because it is one of the two floor models and the usual answer on a 16 GB card.
 
 | | |
 |---|---|
 | `gemma4:12b` | 8.1 GB |
+| `qwen3-embedding:4b` | ~3.4 GB, and it loads *beside* the chat model rather than instead of it |
 | whisper `base` | 0.4 GB, or nothing if you run it on the CPU |
 | whisper `small` | ~1 GB |
 | Kokoro | ~1.5 GB, and happier on the CPU |
@@ -97,8 +103,10 @@ cost:
 | Wan 2.2 TI2V 5B | ~14 GB |
 | FLUX.1 schnell | ~18 GB |
 
-On a 16 GB card, chat plus dictation is comfortable. Chat plus SD 1.5 is tight
-but works. Chat plus SDXL does not fit, and the failure is not an error — it is
+On a 16 GB card, chat plus dictation is comfortable, and chat plus dictation
+plus the embedding model still fits with a little over 3 GB to spare — which is
+the combination a client doing meaning search and voice actually asks for.
+Chat plus SD 1.5 is tight but works. Chat plus SDXL does not fit, and the failure is not an error — it is
 minutes per image while the model runs from system memory. Video is the one
 that does not share: a 5B video model and its text encoder want the card to
 themselves, and the honest way to run both is to let the chat model unload
