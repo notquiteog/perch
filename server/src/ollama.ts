@@ -12,6 +12,12 @@ import { logger } from './log.js';
 const log = logger('ollama');
 
 async function call(path: string, init: RequestInit = {}, timeoutMs = 15_000): Promise<Response> {
+  // transport-exempt: the CONSOLE reaching the sibling container by its compose
+  // name, not the proxy reaching an upstream for a caller. The per-service
+  // proxy answers "how does a tunnelled client's request get out"; this is one
+  // hop across the container bridge on the same machine, where routing it
+  // through Tor would be a loop out to the internet and back to find a
+  // container one address over. `config.ollamaUrl` is the compose network name.
   const res = await fetch(`${config.ollamaUrl}${path}`, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(init.headers || {}) },
@@ -212,6 +218,9 @@ export async function pullModel(
   onProgress: (p: PullProgress) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  // transport-exempt: same hop as `call` above — the console pulling a model
+  // onto this box, over the compose bridge. The download itself is Ollama's own
+  // outbound connection to the registry and is not perch's to route.
   const res = await fetch(`${config.ollamaUrl}/api/pull`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

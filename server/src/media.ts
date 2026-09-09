@@ -287,6 +287,10 @@ function enabled(id: ServiceId): boolean {
 }
 
 async function get(url: string, timeoutMs = 5000): Promise<Response> {
+  // transport-exempt: every caller passes a compose-network address for a
+  // sibling container — this is the console asking what each backend has
+  // installed, on this machine. Nothing a tunnelled client sends comes through
+  // here, so there is no caller whose route a proxy would be protecting.
   return fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
 }
 

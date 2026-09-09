@@ -152,6 +152,9 @@ export async function voiceStatus(): Promise<VoiceStatus> {
     // whisper.cpp serves / and the inference path and nothing else, so a live
     // root is the whole health check. Any answer below 500 counts: a 404 from
     // a listening server still means the address is right.
+    // transport-exempt: the console's own health probe of the sibling whisper
+    // container over the compose bridge, not a caller's request being carried
+    // to an upstream. It reads a status code and nothing else.
     const res = await fetch(`${config.whisperUrl}/`, { signal: AbortSignal.timeout(5000) });
     if (res.status < 500) return { ...base, ok: true, starting: false };
     return { ...base, ok: false, starting: false, error: `HTTP ${res.status}` };
