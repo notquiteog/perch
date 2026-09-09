@@ -52,6 +52,20 @@ still appear token by token; the Anthropic and images routes are the
 exceptions and are translated rather than piped, which
 [docs/SERVICES.md](docs/SERVICES.md) explains in full.
 
+**Somebody else's models, behind your front door.** The chat service does not
+have to be the Ollama on this box. Point it at any OpenAI-compatible service —
+OpenAI, Groq, OpenRouter, Together, Fireworks, NanoGPT, a vLLM in your own
+rack — or at Anthropic, and perch becomes an authenticated, allowlisted,
+optionally Tor-routed front door for that instead. Clients keep working
+unchanged: a composer written against Ollama's API still gets Ollama's API,
+because the endpoints the upstream does not serve are translated rather than
+removed. The provider key is perch's, not the caller's, so it rotates here
+without touching a single client and a leaked perch token cannot be replayed
+against the provider. Two things are refused rather than faked — pulling or
+deleting a model, because there is no file here to fetch or remove, and
+embeddings on Anthropic, because that API has none. Empty is the default and
+means Ollama, where nothing is translated at all.
+
 **A proxy per service, if you want one.** Each of the four services has its own
 upstream address and its own proxy field. Empty is a direct connection;
 `socks5h://127.0.0.1:9150` routes that one service through Tor and leaves the

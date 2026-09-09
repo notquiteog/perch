@@ -9,6 +9,10 @@ export default function Settings() {
   // sent — the server refuses a malformed one, and refusing on every keystroke
   // would be a form that argues while you type.
   const [proxyDraft, setProxyDraft] = useState<Record<string, string>>({});
+  // Held separately from `settings` because the key is never sent back: the
+  // field is blank until somebody types in it, and a blank one on save means
+  // "leave the stored key alone" rather than "clear it".
+  const [upstreamDraft, setUpstreamDraft] = useState<Record<string, { url?: string; key?: string }>>({});
   const [services, setServices] = useState<ServiceInfo[]>([]);
   const [proxyInfo, setProxyInfo] = useState<{ maxConcurrent: number; port: number } | null>(null);
   const [passwordSet, setPasswordSet] = useState(false);
@@ -195,6 +199,81 @@ export default function Settings() {
             <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
               {svc.api.map((shape) => <Tag key={shape}>{shape}</Tag>)}
             </div>
+            {/* What is BEHIND this service, when it is not the container perch
+                ships. Only chat has a choice today; the control is drawn from
+                `upstreamApis` rather than from `svc.id === 'chat'`, so a
+                second one later is a list entry on the server and nothing
+                here. */}
+            {svc.upstreamApis.length > 1 && (
+              <div style={{ marginTop: 10, padding: 10, border: '1px solid var(--line)', borderRadius: 6 }}>
+                <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                  <span className="hint">Behind it</span>
+                  {svc.upstreamApis.map((shape) => (
+                    <button
+                      key={shape}
+                      className={(settings?.upstreams?.[svc.id]?.api || svc.upstreamApis[0]) === shape ? '' : 'ghost'}
+                      disabled={busy !== null}
+                      onClick={() => void run(`upstream-${svc.id}`, () => api.saveSettings({ upstreams: { [svc.id]: { api: shape } } }))}
+                    >
+                      {shape === 'ollama' ? 'Ollama (this box)' : shape === 'openai' ? 'OpenAI-compatible' : 'Anthropic'}
+                    </button>
+                  ))}
+                </div>
+                <p className="hint" style={{ margin: '6px 0 0' }}>
+                  {(settings?.upstreams?.[svc.id]?.api || svc.upstreamApis[0]) === 'ollama'
+                    ? 'The models on this machine. Every endpoint is streamed straight through — perch never reads a request body.'
+                    : 'perch becomes the front door for a hosted API: the same token, the same allowlist, the same proxy and the same activity log, in front of somebody else’s models. Endpoints that shape does not serve are translated, and pulling or deleting a model is refused — there is no file here to fetch or remove.'}
+                </p>
+                {(settings?.upstreams?.[svc.id]?.api || svc.upstreamApis[0]) !== 'ollama' && (
+                  <>
+                    <label style={{ display: 'block', marginTop: 8 }}>
+                      <span className="hint">Its address</span>
+                      <input
+                        className="mono"
+                        style={{ width: '100%', marginTop: 4 }}
+                        placeholder="https://api.openai.com/v1"
+                        value={upstreamDraft[svc.id]?.url ?? settings?.upstreams?.[svc.id]?.url ?? ''}
+                        onChange={(e) => setUpstreamDraft({ ...upstreamDraft, [svc.id]: { ...upstreamDraft[svc.id], url: e.target.value } })}
+                        onBlur={() => {
+                          const url = upstreamDraft[svc.id]?.url;
+                          if (url === undefined || url === (settings?.upstreams?.[svc.id]?.url ?? '')) return;
+                          void run(`upstream-url-${svc.id}`, () => api.saveSettings({ upstreams: { [svc.id]: { url } } }));
+                        }}
+                      />
+                      <span className="hint">
+                        The server’s root — https://api.groq.com/openai/v1, https://openrouter.ai/api/v1,
+                        https://api.together.xyz/v1, https://api.anthropic.com. Anything speaking one of these
+                        shapes works, listed here or not.
+                      </span>
+                    </label>
+                    <label style={{ display: 'block', marginTop: 8 }}>
+                      <span className="hint">perch’s key for it</span>
+                      <input
+                        type="password"
+                        className="mono"
+                        style={{ width: '100%', marginTop: 4 }}
+                        placeholder={settings?.upstreams?.[svc.id]?.hasKey ? 'a key is stored — leave blank to keep it' : 'sk-…'}
+                        value={upstreamDraft[svc.id]?.key ?? ''}
+                        onChange={(e) => setUpstreamDraft({ ...upstreamDraft, [svc.id]: { ...upstreamDraft[svc.id], key: e.target.value } })}
+                        onBlur={() => {
+                          const key = upstreamDraft[svc.id]?.key;
+                          if (!key) return;
+                          void run(`upstream-key-${svc.id}`, async () => {
+                            await api.saveSettings({ upstreams: { [svc.id]: { key } } });
+                            setUpstreamDraft({ ...upstreamDraft, [svc.id]: { ...upstreamDraft[svc.id], key: '' } });
+                          }, 'Key saved.');
+                        }}
+                      />
+                      <span className="hint">
+                        This is perch’s credential for that service, never a caller’s token. A client on the far
+                        end of a tunnel holds a perch token and never sees this one, so it rotates here without
+                        touching anything — and a leaked perch token cannot be replayed against the provider.
+                      </span>
+                    </label>
+                  </>
+                )}
+              </div>
+            )}
             {/* Where this service's upstream is, and how it is reached. Both
                 are per service because the four upstreams are four different
                 servers: a chat model on a rented box across the internet and a

@@ -116,6 +116,10 @@ export interface PerchSettings {
   unloadWhenIdle: boolean;
   /** Per service: a proxy URL for reaching its upstream, or empty for direct. */
   proxies: Record<ServiceId, string>;
+  // The key is never sent back — `hasKey` is all the console needs to draw
+  // "a key is stored; leave blank to keep it", and a screenshot of this page
+  // is then not a leaked credential.
+  upstreams: Record<ServiceId, { api: string; url: string; hasKey: boolean }>;
 }
 
 export interface ServiceInfo {
@@ -126,7 +130,7 @@ export interface ServiceInfo {
   /** The same as `speaks`, as data — one badge per shape. */
   api: Array<'ollama' | 'openai' | 'anthropic' | 'comfyui'>;
   /** This service's own upstream, and the env var that presets its proxy. */
-  upstream: string; proxyEnv: string;
+  upstream: string; proxyEnv: string; upstreamApis: string[];
   vramHintBytes: number;
   routes: Array<{ method: string; path: string; scope: string }>;
 }
@@ -294,7 +298,7 @@ export const api = {
     proxy: { maxConcurrent: number; port: number };
     hostAvailable: boolean;
   }>('/api/settings'),
-  saveSettings: (body: Partial<{ allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean; proxies: Partial<Record<ServiceId, string>> }>) =>
+  saveSettings: (body: Partial<{ allowManage: boolean; keepAlive: string; unloadWhenIdle: boolean; proxies: Partial<Record<ServiceId, string>>; upstreams: Partial<Record<ServiceId, { api?: string; url?: string; key?: string }>> }>) =>
     request<{ settings: PerchSettings }>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
   // Both halves of each knob: what .env asks for, and what the container that
   // reads it was actually created with. They differ while a change is written

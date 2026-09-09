@@ -23,12 +23,13 @@
 import http from 'node:http';
 import { Readable } from 'node:stream';
 import { config } from './config.js';
-import { type ServiceDef, type Route } from './services.js';
+import { type ApiShape, type ServiceDef, type Route } from './services.js';
 import { authenticate, isBlocked, noteAuthFailure, noteAuthSuccess, noteTokenUse, type Scope } from './auth.js';
 import { loadState } from './state.js';
 import { record } from './activity.js';
 import { recordGeneration, recordTokens } from './metrics.js';
 import { handleCountTokens, handleMessages } from './anthropic.js';
+import { handle as handleUpstream, planFor, errorFor, type UpstreamTarget } from './chatUpstream.js';
 import { upstreamFor } from './upstream.js';
 import { handleImageModels, handleImages } from './images.js';
 import { logger } from './log.js';
@@ -47,6 +48,25 @@ const HOP_BY_HOP = new Set([
   // put the token in a second process's memory for no reason.
   'authorization',
 ]);
+
+/**
+ * Which shape is behind a service, validated against what that service allows.
+ *
+ * A setting is not trusted to be one of the shapes the service can actually
+ * front. `state.json` is a file on disk that a script can write, and an
+ * unrecognised value there would otherwise fall through to a translator that
+ * does not exist — so anything not on the service's own list means the first
+ * entry, which is its native shape and the behaviour every install had before
+ * this setting existed.
+ */
+function pickUpstreamApi(service: ServiceDef, configured: string | undefined): ApiShape {
+  const allowed = service.upstreamApis;
+  const want = String(configured ?? '');
+  if ((allowed as string[]).includes(want)) return want as ApiShape;
+  // Every service declares at least one; the fallback is defensive against a
+  // hand-edited table rather than a case that can happen.
+  return allowed[0] ?? 'ollama';
+}
 
 function clientIp(req: http.IncomingMessage): string {
   // Deliberately the real peer address and never X-Forwarded-For: through the
@@ -72,10 +92,19 @@ export function createProxyServer(service: ServiceDef): http.Server {
     // because a wrong proxy is a service that has stopped answering.
     let upstream: URL;
     let agent: http.Agent | undefined;
+    // What is behind this service, which is the shipped container unless an
+    // operator has pointed it somewhere else. Resolved per request alongside
+    // the proxy and for the same reason: a change in the console should take
+    // effect on the next call rather than on the next restart.
+    let target: UpstreamTarget;
     try {
-      const resolved = upstreamFor(service.upstream, loadState().settings.proxies?.[service.id]);
+      const setting = loadState().settings.upstreams?.[service.id];
+      const api = pickUpstreamApi(service, setting?.api);
+      const address = setting?.url || service.upstream;
+      const resolved = upstreamFor(address, loadState().settings.proxies?.[service.id]);
       upstream = resolved.url;
       agent = resolved.agent;
+      target = { api, url: address, key: setting?.key ?? '', agent };
     } catch (e) {
       // A proxy that will not parse is refused rather than ignored. Falling
       // back to a direct connection would send the traffic somewhere the
@@ -185,6 +214,37 @@ export function createProxyServer(service: ServiceDef): http.Server {
     // Recording the use writes the state file, so it happens once per accepted
     // request rather than per chunk.
     noteTokenUse(auth.token!.id, ip);
+
+    // What happens to this request, given what the client is speaking and what
+    // is actually behind the service.
+    //
+    // On the default configuration — an Ollama upstream — this is always
+    // `pipe` and nothing below it runs, so the parser-free path is unchanged
+    // for every install that has not asked for something else.
+    const plan = planFor(route.op, route.shape, target.api);
+
+    if (plan.kind === 'refuse') {
+      // A hosted upstream genuinely cannot do this, and saying so beats
+      // faking it: an empty model list or an empty vector would be a plausible
+      // lie that a client indexes against. The message names the setting.
+      send(res, plan.status, errorFor(route.shape ?? 'ollama', plan.status, plan.message));
+      finish(plan.status, `not available on a ${target.api} upstream`);
+      return;
+    }
+
+    if (plan.kind === 'translate') {
+      if (route.generating) inFlight += 1;
+      void handleUpstream({ req, res, target, shape: route.shape!, op: route.op!, started })
+        .then((r) => {
+          if (route.generating) {
+            inFlight -= 1;
+            if (r.tokens) recordTokens(r.tokens);
+            recordGeneration(r.tokens, Date.now() - started, r.ttftMs);
+          }
+          finish(r.status, `translated to ${target.api}`, r.bytes);
+        });
+      return;
+    }
 
     // The translated shapes. Everything above this line has already run, so
     // these paths are authenticated, scoped, size-capped and blocked exactly

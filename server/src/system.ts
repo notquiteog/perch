@@ -164,6 +164,24 @@ export const EMBED_MODELS: ModelChoice[] = [
     name: 'embeddinggemma', sizeBytes: 0.62e9, needsBytes: 1.1e9, params: '300M', contextTokens: 2048,
     note: 'Larger again. Worth it only if you search a large collection and find the others imprecise.',
   },
+  // The two Qwen3 embedders — a different class from the three above. Those
+  // fit in a corner of a VPS; these want the card. Worth having here because
+  // perch IS the machine with the card, and this is the list a client points
+  // at when it wants an embedder better than a hosted one.
+  //
+  // Vector width matters more than the download for these, and neither is
+  // reported by any listing: the 4B answers 2560 numbers per vector and the 8B
+  // answers 4096, against 384 for all-minilm. Whatever stores them pays that
+  // multiple on every row, so it is a decision about somebody else's disk as
+  // well as about this card.
+  {
+    name: 'qwen3-embedding:4b', sizeBytes: 2.5e9, needsBytes: 3.4e9, params: '4B', contextTokens: 32768,
+    note: 'Strong multilingual retrieval, 2560-wide vectors, and a 32k input window so a long document embeds whole. Wants the GPU; on CPU a first index pass over a real collection is an overnight job.',
+  },
+  {
+    name: 'qwen3-embedding:8b', sizeBytes: 4.7e9, needsBytes: 6.2e9, params: '8B', contextTokens: 32768,
+    note: 'The best open-weight retrieval model here and the widest at 4096. Only worth it with room on the card beside whatever language model is loaded.',
+  },
 ];
 
 export interface Sizing {

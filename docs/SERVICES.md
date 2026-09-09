@@ -166,6 +166,100 @@ Everything else crosses: the system prompt (lifted back into the message list),
 tool definitions and tool results, `max_tokens` as `num_predict`, temperature,
 top-p, top-k, stop sequences, and `thinking` as Ollama's `think`.
 
+## Putting the chat service in front of somebody else's models
+
+Everything above assumes the upstream is the Ollama on this box, which is the
+default and what every install has until it is changed. It does not have to be.
+
+```
+PERCH_CHAT_UPSTREAM_API=openai        # or anthropic; empty means Ollama
+PERCH_CHAT_UPSTREAM_URL=https://api.groq.com/openai/v1
+PERCH_CHAT_UPSTREAM_KEY=gsk_...
+```
+
+or the same three fields in **Settings → Services → Chat** in the console,
+which take effect on the next request rather than on the next restart.
+
+### Why a host gains a "which provider" setting
+
+Everything valuable about perch is the front door: one bearer token, one port
+per service, a route table that is the whole of what can be reached, a proxy
+per service, a concurrency backstop, and a console that says what has been
+asked. None of that is about Ollama — and an operator who wanted those
+properties in front of OpenAI, Groq, OpenRouter, Together, Fireworks, NanoGPT
+or Anthropic could not have them, because the upstream was assumed to speak
+Ollama's API.
+
+The provider key is **perch's**, not the caller's. A client on the far end of
+the tunnel holds a perch token and never sees the OpenAI key, so the key can be
+rotated, scoped and revoked here without touching a single client — and a
+leaked perch token cannot be replayed against OpenAI directly.
+
+### What happens to each route
+
+Decided by the pair (what the client is speaking, what the upstream serves) in
+`planFor` in `server/src/chatUpstream.ts`:
+
+| | Ollama upstream | OpenAI-compatible upstream | Anthropic upstream |
+|---|---|---|---|
+| Ollama-shaped routes | pipe | translate | translate |
+| OpenAI-shaped routes | pipe | **pipe** | translate |
+| `/v1/messages` | translate | translate | **pipe** |
+| `/api/pull`, `/api/delete` | pipe | **501** | **501** |
+| `/api/embed`, `/v1/embeddings` | pipe | translate | **501** |
+| `/api/ps` | pipe | `{models: []}` | `{models: []}` |
+
+Two things worth reading off that table. A hosted upstream still **pipes the
+shape it already speaks**, which is the common reason to put perch in front of
+one at all — the token and the allowlist with no translation. And the refusals
+are refusals: pulling a model onto a hosted API is meaningless, and Anthropic
+has no embeddings endpoint, so both answer 501 naming the setting rather than
+an empty list or an empty vector. A plausible lie is worse than an error here —
+an empty model list reads as "you have no models", and an empty vector reads as
+a successful embedding and gets indexed against.
+
+`/api/ps` is the exception that answers rather than refusing, because an empty
+list is *true*: nothing is resident on this machine. A polling client reads an
+error as "the server is broken" and an empty list as "nothing loaded", which is
+what has actually happened.
+
+### Everything goes through Ollama's shape
+
+Three shapes talking to three shapes is nine conversions and nine places for
+one to be subtly wrong. `server/src/shapes.ts` converts through a hub instead,
+and the hub is Ollama's shape — because perch already speaks it everywhere, and
+because on the default configuration it is also the upstream, so the common
+case converts nothing at all.
+
+The cost is honest: a client speaking Anthropic to an upstream speaking OpenAI
+is converted twice, and anything neither shape carries is lost at the first hop
+rather than the second. What is lost is listed against each function in that
+file. The traps worth knowing without reading it:
+
+- **Ollama-only sampling knobs are never forwarded.** `top_k`, `min_p`,
+  `repeat_penalty`, `num_ctx` and `keep_alive` are dropped, because real OpenAI
+  answers 400 to a parameter it does not know — and that failure looks like a
+  bad prompt rather than a bad translation.
+- **`temperature` is withheld from current Anthropic models.** It was removed
+  on that generation and sending it is a 400, not an ignored field. An
+  allowlist decides, so a model released after this was written is treated as
+  not taking it — the safe direction.
+- **Tool arguments change form in both directions.** OpenAI sends them as a
+  JSON string and Ollama wants an object; a string left unparsed reaches the
+  model as a quoted blob and the tool is called with nothing.
+- **A `tool` message without the id of the call it answers is demoted to a
+  user turn** rather than sent as a 400 both OpenAI and Anthropic would return.
+- **Remote image URLs are dropped, not fetched.** perch would be the thing
+  making that request, from inside your network, at the direction of whoever
+  wrote the prompt.
+- **`/api/show` answers with its fields empty.** A hosted catalogue publishes
+  no parameter count, quantisation or context length, and inventing one would
+  let a client size a window from a guess.
+
+The parsing cost is the same one the Anthropic route already pays, and the same
+bounds hold: nothing is written or logged, the body is read under the same
+ceiling, and the response is still streamed event by event.
+
 ## Reaching an upstream through a proxy
 
 Each service has its own upstream address — `PERCH_OLLAMA_URL`,

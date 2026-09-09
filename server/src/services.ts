@@ -25,6 +25,32 @@ export type ServiceId = 'chat' | 'voice' | 'video' | 'audio';
 export type Translator = 'messages' | 'count_tokens' | 'images' | 'image_models';
 
 /**
+ * What a route DOES, independent of the shape it is written in.
+ *
+ * `/api/chat` and `/v1/chat/completions` and `/v1/messages` are three
+ * spellings of one operation, and until the upstream could be something other
+ * than Ollama, that never had to be said out loud — every route was a pipe and
+ * the spelling was all that mattered.
+ *
+ * It matters now. With a hosted upstream, what perch has to do with a request
+ * is decided by the pair (what the client is asking for, what the upstream
+ * serves), and `op` is the first half of that pair. Naming it here rather than
+ * matching on paths in the dispatcher keeps this table the single place a
+ * route is described — which is the property that made the token, the scope,
+ * the concurrency backstop and the activity ring impossible to skip.
+ */
+export type Op =
+  | 'chat'      // a generation
+  | 'embed'     // text to vectors
+  | 'models'    // what is available
+  | 'resident'  // what is loaded right now
+  | 'show'      // one model's metadata
+  | 'version'   // the server's own version
+  | 'tokens'    // count them without generating
+  | 'pull'      // download a model onto this box
+  | 'delete';   // remove one from this box
+
+/**
  * The wire shapes a service answers, as data rather than as prose.
  *
  * `speaks` below says the same thing in a sentence, and that sentence is for a
@@ -41,6 +67,17 @@ export type ApiShape = 'ollama' | 'openai' | 'anthropic' | 'comfyui';
 export interface Route {
   method: string;
   path: string;
+  /** What this route does. Absent for the services that have one upstream shape. */
+  op?: Op;
+  /**
+   * The shape the CLIENT is speaking on this route.
+   *
+   * Not the same question as `ServiceDef.api`, which says what the service as
+   * a whole answers. `/api/tags` is `ollama` and `/v1/models` is `openai` on
+   * the very same port, and with a hosted upstream those two need different
+   * handling — so it is per route.
+   */
+  shape?: ApiShape;
   /** Counts against the concurrency backstop. */
   generating?: boolean;
   /** Needs the 'manage' scope rather than 'use'. */
@@ -80,6 +117,21 @@ export interface ServiceDef {
   /** The same, as data. See `ApiShape`. */
   api: ApiShape[];
   /**
+   * The shapes this service's UPSTREAM may speak, first being the default.
+   *
+   * The mirror of `api`, and a genuinely different question. `api` is what
+   * perch answers on this port — what a client may be written against. This is
+   * what may be behind it.
+   *
+   * Only the chat service has a choice today, and that is not an accident of
+   * effort: whisper.cpp, Kokoro and ComfyUI have exactly one shape each and no
+   * hosted alternative that speaks it differently, so a second entry would be
+   * a setting with nothing behind it. The field is on every service anyway so
+   * that adding one is a list entry rather than a new settings layout — the
+   * same reason `proxyEnv` is.
+   */
+  upstreamApis: ApiShape[];
+  /**
    * The environment variable holding this service's proxy, if it has one set.
    *
    * Each service reaches its own upstream, and each may reach it its own way:
@@ -114,34 +166,38 @@ export const SERVICES: ServiceDef[] = [
     container: 'ollama',
     speaks: 'Ollama’s API, OpenAI’s /v1 chat, completions and embeddings, and Anthropic’s /v1/messages',
     api: ['ollama', 'openai', 'anthropic'],
+    // Ollama by default and by history. `openai` covers OpenAI, Groq,
+    // OpenRouter, Together, Fireworks, NanoGPT and anything else that copied
+    // that shape; `anthropic` is the Messages API. See chatUpstream.ts.
+    upstreamApis: ['ollama', 'openai', 'anthropic'],
     proxyEnv: 'PERCH_CHAT_PROXY',
     ternField: 'Admin → AI model → Base URL',
     // Everything Tern asks Ollama for, and nothing else. Ollama's own API is
     // wider than this — /api/create, /api/push and the blob endpoints can
     // write a model onto this box or ship one off it — so they are absent.
     routes: [
-      { method: 'GET', path: '/api/version' },
-      { method: 'GET', path: '/api/tags' },
-      { method: 'GET', path: '/api/ps' },
-      { method: 'POST', path: '/api/show' },
-      { method: 'POST', path: '/api/chat', generating: true },
-      { method: 'POST', path: '/api/generate', generating: true },
-      { method: 'POST', path: '/api/embed' },
-      { method: 'POST', path: '/api/embeddings' },
-      { method: 'POST', path: '/api/pull', manage: true },
-      { method: 'DELETE', path: '/api/delete', manage: true },
-      { method: 'GET', path: '/v1/models' },
-      { method: 'POST', path: '/v1/chat/completions', generating: true },
-      { method: 'POST', path: '/v1/completions', generating: true },
-      { method: 'POST', path: '/v1/embeddings' },
+      { method: 'GET', path: '/api/version', op: 'version', shape: 'ollama' },
+      { method: 'GET', path: '/api/tags', op: 'models', shape: 'ollama' },
+      { method: 'GET', path: '/api/ps', op: 'resident', shape: 'ollama' },
+      { method: 'POST', path: '/api/show', op: 'show', shape: 'ollama' },
+      { method: 'POST', path: '/api/chat', op: 'chat', shape: 'ollama', generating: true },
+      { method: 'POST', path: '/api/generate', op: 'chat', shape: 'ollama', generating: true },
+      { method: 'POST', path: '/api/embed', op: 'embed', shape: 'ollama' },
+      { method: 'POST', path: '/api/embeddings', op: 'embed', shape: 'ollama' },
+      { method: 'POST', path: '/api/pull', op: 'pull', shape: 'ollama', manage: true },
+      { method: 'DELETE', path: '/api/delete', op: 'delete', shape: 'ollama', manage: true },
+      { method: 'GET', path: '/v1/models', op: 'models', shape: 'openai' },
+      { method: 'POST', path: '/v1/chat/completions', op: 'chat', shape: 'openai', generating: true },
+      { method: 'POST', path: '/v1/completions', op: 'chat', shape: 'openai', generating: true },
+      { method: 'POST', path: '/v1/embeddings', op: 'embed', shape: 'openai' },
       // The two Anthropic-shaped routes. Unlike every other entry in this
       // table these are NOT piped to Ollama — Ollama does not serve this
       // shape, so `anthropic.ts` translates them. They are listed here anyway
       // because this table is what decides the token, the scope, the
       // concurrency backstop and the activity ring, and a route that skipped
       // it would skip all four.
-      { method: 'POST', path: '/v1/messages', generating: true, translated: 'messages' },
-      { method: 'POST', path: '/v1/messages/count_tokens', translated: 'count_tokens' },
+      { method: 'POST', path: '/v1/messages', op: 'chat', shape: 'anthropic', generating: true, translated: 'messages' },
+      { method: 'POST', path: '/v1/messages/count_tokens', op: 'tokens', shape: 'anthropic', translated: 'count_tokens' },
     ],
   },
   {
@@ -154,6 +210,7 @@ export const SERVICES: ServiceDef[] = [
     container: 'whisper',
     speaks: 'OpenAI’s /v1/audio/transcriptions',
     api: ['openai'],
+    upstreamApis: ['openai'],
     proxyEnv: 'PERCH_VOICE_PROXY',
     ternField: 'Admin → AI model → Dictation → Transcriber address',
     // One endpoint. Tern posts audio to the OpenAI path, which is where
@@ -173,6 +230,7 @@ export const SERVICES: ServiceDef[] = [
     container: 'comfy',
     speaks: 'OpenAI’s /v1/images/generations, and ComfyUI’s workflow API — POST /prompt, then /history and /view',
     api: ['openai', 'comfyui'],
+    upstreamApis: ['comfyui'],
     proxyEnv: 'PERCH_VIDEO_PROXY',
     ternField: null,
     // ComfyUI's API is small but not harmless: it can load models by name,
@@ -220,6 +278,7 @@ export const SERVICES: ServiceDef[] = [
     container: 'kokoro',
     speaks: 'OpenAI’s /v1/audio/speech',
     api: ['openai'],
+    upstreamApis: ['openai'],
     proxyEnv: 'PERCH_AUDIO_PROXY',
     ternField: null,
     // The mirror image of dictation: audio out rather than in, on the OpenAI

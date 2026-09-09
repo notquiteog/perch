@@ -11,7 +11,7 @@ import {
   checkConsolePassword, consolePasswordSet, createSession, deleteToken, endSession,
   mintToken, revokeToken, setConsolePassword, validSession, type Scope,
 } from './auth.js';
-import { loadState, updateState } from './state.js';
+import { loadState, updateState, type Settings } from './state.js';
 import * as ollama from './ollama.js';
 import { cancelPull, listPulls, startPull, watchPull } from './pulls.js';
 import { configuredSpeechModel, currentSpeechModel, validSpeechModel, voiceStatus } from './voice.js';
@@ -206,7 +206,7 @@ export function buildApi(): Router {
         ternBaseUrl: tunnel.ternBaseUrl(c),
       })),
       endpointUp: await tunnel.localEndpointUp(),
-      settings: s.settings,
+      settings: redactSettings(s.settings),
       tokens: s.tokens.filter((t) => !t.revokedAt).length,
       activity: summary(),
       throughput: throughput(),
@@ -731,7 +731,7 @@ export function buildApi(): Router {
     const wanted = new Set(config.enabledServices.split(',').map((x) => x.trim()).filter(Boolean));
     wanted.add('chat');
     sendJson(ctx.res, 200, {
-      settings: loadState().settings,
+      settings: redactSettings(loadState().settings),
       services: SERVICES.map((svc) => ({
         id: svc.id,
         label: svc.label,
@@ -750,6 +750,10 @@ export function buildApi(): Router {
         // servers and are routinely reached four different ways.
         upstream: svc.upstream,
         proxyEnv: svc.proxyEnv,
+        // Which shapes may be BEHIND this service, first being its native
+        // one. Only chat has a choice today; the field is on every service so
+        // that adding one is a list entry rather than a new settings layout.
+        upstreamApis: svc.upstreamApis,
         vramHintBytes: SERVICE_VRAM_HINT[svc.id],
         routes: routeTable(svc),
       })),
@@ -758,11 +762,30 @@ export function buildApi(): Router {
     });
   });
 
+/**
+ * Settings as the console may see them.
+ *
+ * An upstream key is perch's credential for a hosted API, and the console is
+ * reachable over a tunnel and screenshotted into support threads. It is
+ * replaced by a boolean saying whether one is set — which is all the page
+ * needs to draw "a key is stored; leave blank to keep it", and is the same
+ * rule the API tokens already follow.
+ */
+function redactSettings(s: Settings): unknown {
+  return {
+    ...s,
+    upstreams: Object.fromEntries(
+      Object.entries(s.upstreams).map(([id, u]) => [id, { api: u.api, url: u.url, hasKey: Boolean(u.key) }]),
+    ),
+  };
+}
+
   r.put('/api/settings', async (ctx) => {
     requireConsole(ctx);
     const body = await readJson<{
       allowManage?: boolean; keepAlive?: string; unloadWhenIdle?: boolean;
       proxies?: Partial<Record<ServiceId, string>>;
+      upstreams?: Partial<Record<ServiceId, { api?: string; url?: string; key?: string }>>;
     }>(ctx.req);
     if (body.keepAlive !== undefined && !/^-?\d+[smh]?$/.test(body.keepAlive)) {
       throw badRequest('Keep loaded wants a duration such as 30s, 10m or 1h — or -1 to never unload.');
@@ -779,6 +802,29 @@ export function buildApi(): Router {
         }
       }
     }
+    // Same rule as the proxies: refused here rather than at the first request
+    // through it. A shape the service cannot front would otherwise save
+    // cleanly and then answer 501 to everything, with the reason in a log
+    // nobody is reading yet.
+    for (const [id, value] of Object.entries(body.upstreams ?? {})) {
+      const svc = SERVICES.find((x) => x.id === id);
+      if (!svc) throw badRequest(`no such service: ${id}`);
+      const api = String(value?.api ?? '');
+      if (api && !(svc.upstreamApis as string[]).includes(api)) {
+        throw badRequest(`${id} cannot front a ${api} upstream; it speaks ${svc.upstreamApis.join(', ')}`);
+      }
+      const url = String(value?.url ?? '').trim();
+      if (url) {
+        let parsed: URL;
+        try { parsed = new URL(url); } catch { throw badRequest(`${id}: "${url}" is not a valid URL`); }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw badRequest(`${id}: an upstream address must be http or https`);
+        }
+        // A credential in a URL is a credential in every log between here and
+        // there, and there is a field for it two lines down.
+        if (parsed.username || parsed.password) throw badRequest(`${id}: put the token in the key field, not in the address`);
+      }
+    }
     const next = updateState((s) => {
       if (body.allowManage !== undefined) s.settings.allowManage = Boolean(body.allowManage);
       if (body.keepAlive !== undefined) s.settings.keepAlive = body.keepAlive;
@@ -786,8 +832,21 @@ export function buildApi(): Router {
       for (const [id, value] of Object.entries(body.proxies ?? {})) {
         s.settings.proxies[id as ServiceId] = String(value ?? '').trim();
       }
+      for (const [id, value] of Object.entries(body.upstreams ?? {})) {
+        const current = s.settings.upstreams[id as ServiceId] ?? { api: '', url: '', key: '' };
+        s.settings.upstreams[id as ServiceId] = {
+          api: value?.api !== undefined ? String(value.api).trim() : current.api,
+          url: value?.url !== undefined ? String(value.url).trim().replace(/\/+$/, '') : current.url,
+          // An absent key means "leave it alone", which is what lets the
+          // console edit an upstream whose key it is never sent. An empty
+          // STRING is a deliberate clear.
+          key: value?.key !== undefined ? String(value.key) : current.key,
+        };
+      }
     }).settings;
-    sendJson(ctx.res, 200, { settings: next });
+    // The keys never come back. The console shows whether one is set and
+    // nothing more, so a screenshot of this page is not a leaked credential.
+    sendJson(ctx.res, 200, { settings: redactSettings(next) });
   });
 
   // Ollama's own knobs live in .env, because Ollama reads them at startup.

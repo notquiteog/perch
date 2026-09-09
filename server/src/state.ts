@@ -103,6 +103,47 @@ export interface Settings {
    * because a wrong proxy is a service that stops answering.
    */
   proxies: Record<ServiceId, string>;
+
+  /**
+   * What is BEHIND a service, when that is not the container perch ships.
+   *
+   * ── Why a host gains a "which provider" setting at all ──────────────────
+   *
+   * perch has always been an authenticated, allowlisted, activity-logged front
+   * door with an Ollama behind it. Everything valuable about it is the front
+   * door: one token, one port per service, a proxy per service, a route table
+   * that is the whole of what can be reached, and a console that says what has
+   * been asked. None of that is about Ollama — and an operator who wants those
+   * properties in front of OpenAI, Groq, OpenRouter or Anthropic previously
+   * could not have them, because the upstream was assumed to speak Ollama.
+   *
+   * So the upstream gains a SHAPE. With `api: 'ollama'` — the default and what
+   * every existing install has — nothing changes and every route is still a
+   * pipe. With anything else, the routes whose shape the upstream does not
+   * serve are translated instead (see chatUpstream.ts), and the ones it does
+   * serve are still piped.
+   *
+   * ── The key is perch's, not the caller's ────────────────────────────────
+   *
+   * `key` is the credential perch presents UPSTREAM. It is deliberately not
+   * the caller's token: the whole point is that a client on the far end of a
+   * tunnel holds a perch token and never the OpenAI key, so the key can be
+   * rotated, scoped and revoked here without touching any client — and a
+   * leaked perch token cannot be replayed against OpenAI directly.
+   *
+   * Empty `api` means "whatever this service natively is", which keeps a state
+   * file written before this existed meaning exactly what it meant.
+   */
+  upstreams: Record<ServiceId, UpstreamSetting>;
+}
+
+export interface UpstreamSetting {
+  /** '' means the service's own native shape. See `ServiceDef.upstreamApis`. */
+  api: string;
+  /** '' means the address from the environment, which is the shipped container. */
+  url: string;
+  /** perch's own credential for that upstream. Never a caller's token. */
+  key: string;
 }
 
 export interface State {
@@ -127,6 +168,12 @@ const DEFAULTS: State = {
       voice: config.voiceProxy,
       video: config.videoProxy,
       audio: config.audioProxy,
+    },
+    upstreams: {
+      chat: { api: config.chatUpstreamApi, url: config.chatUpstreamUrl, key: config.chatUpstreamKey },
+      voice: { api: '', url: '', key: '' },
+      video: { api: '', url: '', key: '' },
+      audio: { api: '', url: '', key: '' },
     },
   },
 };
@@ -183,6 +230,16 @@ function merge(loaded: unknown): State {
       // older perch that knew three services would otherwise drop the fourth
       // to `undefined` rather than to its default.
       proxies: { ...DEFAULTS.settings.proxies, ...(l.settings?.proxies ?? {}) },
+      // Same one-level-deeper merge, and for the same reason: a file written
+      // before this setting existed has no `upstreams` at all, and one written
+      // by a perch that knew fewer services would otherwise leave the rest
+      // `undefined` — which reads as "no upstream" rather than "the default".
+      upstreams: {
+        ...DEFAULTS.settings.upstreams,
+        ...Object.fromEntries(Object.entries(l.settings?.upstreams ?? {}).map(([k, v]) => [
+          k, { api: '', url: '', key: '', ...(v as Partial<UpstreamSetting>) },
+        ])),
+      },
     },
   };
 }

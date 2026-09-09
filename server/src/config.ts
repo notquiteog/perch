@@ -98,6 +98,29 @@ export const config = {
   // perch, so there is no unauthenticated back door on the LAN.
   ollamaUrl: env('PERCH_OLLAMA_URL', 'http://ollama:11434').replace(/\/+$/, ''),
 
+  // What is behind the chat service, when it is not that Ollama.
+  //
+  // Empty — the default and what every existing install has — means Ollama,
+  // and every route on the chat service stays a straight pipe. Set to `openai`
+  // or `anthropic` and perch becomes a front door for a hosted API instead:
+  // the same token, the same allowlist, the same per-service proxy, the same
+  // activity ring, in front of OpenAI, Groq, OpenRouter, Together, Fireworks,
+  // NanoGPT, Anthropic or anything else speaking one of those two shapes.
+  //
+  // The routes the upstream does not natively serve are translated rather than
+  // removed, so a client written against Ollama's API keeps working when the
+  // operator moves the models to a hosted provider — which is the whole point.
+  // See chatUpstream.ts, which is explicit about what a translated route
+  // cannot do that a piped one can.
+  //
+  // The key is PERCH's credential for that upstream, never the caller's token:
+  // a client on the far end of a tunnel holds a perch token and never the
+  // OpenAI key, so the key rotates here without touching any client and a
+  // leaked perch token cannot be replayed against OpenAI directly.
+  chatUpstreamApi: env('PERCH_CHAT_UPSTREAM_API', ''),
+  chatUpstreamUrl: env('PERCH_CHAT_UPSTREAM_URL', '').replace(/\/+$/, ''),
+  chatUpstreamKey: env('PERCH_CHAT_UPSTREAM_KEY', ''),
+
   // Tokens, settings and the tunnel's heartbeat. A volume in compose, a
   // directory on the host under bin/perch.
   stateDir: env('PERCH_STATE_DIR', '/var/lib/perch'),
