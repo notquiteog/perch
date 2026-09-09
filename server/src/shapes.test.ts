@@ -211,6 +211,20 @@ test('max_tokens is always sent, because the Messages API refuses a request with
   assert.ok(Number.isFinite(out.max_tokens) && out.max_tokens > 0);
   const explicit = ollamaToAnthropicRequest({ model: 'claude-x', messages: [], options: { num_predict: 77 } });
   assert.equal(explicit.max_tokens, 77);
+
+  // A client that asked for no ceiling gets the MODEL's ceiling, supplied by
+  // the caller, rather than a number this file invented. perch must not impose
+  // a limit nobody asked for: a client speaking Ollama routinely omits
+  // num_predict, and the old 4096 default truncated every long hosted answer
+  // for all of them — a well-formed response with the stop reason buried,
+  // which reads as the model simply stopping.
+  const supplied = ollamaToAnthropicRequest({ model: 'claude-x', messages: [] }, 64_000);
+  assert.equal(supplied.max_tokens, 64_000);
+
+  // An explicit request still wins over the model's ceiling: a client that
+  // asked for a short answer wanted a short answer.
+  const both = ollamaToAnthropicRequest({ model: 'claude-x', messages: [], options: { num_predict: 77 } }, 64_000);
+  assert.equal(both.max_tokens, 77);
 });
 
 test('temperature is withheld from the models that answer 400 to it', () => {

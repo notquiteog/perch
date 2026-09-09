@@ -474,6 +474,61 @@ function pathFor(op: Op, api: ApiShape): string {
   return '/v1/chat/completions';
 }
 
+// ---------- "As much as the model will give" ----------
+//
+// A client speaking Ollama need not send `num_predict`, and most do not:
+// Ollama's own answer to a missing one is to generate until it is finished.
+// Anthropic has no equivalent — `max_tokens` is required and a request without
+// it is refused — so perch has to supply a number, and whatever it picks is a
+// ceiling the client never asked for.
+//
+// It used to pick 4096. That silently truncated every long answer from a
+// hosted model for every client that did not know to ask for more, which is
+// the worst shape of the bug: the response is well-formed, the stop reason is
+// buried, and it looks like the model simply stopped.
+//
+// A large constant is not the fix. Output ceilings differ per model, and one
+// above the real ceiling is a 400 from the upstream — a broken gateway rather
+// than a short answer. So the model's own maximum is asked for and remembered.
+const outputLimits = new Map<string, number>();
+
+// Only when the upstream will not say. Conservative on purpose: every current
+// Anthropic model accepts at least this, so being wrong costs a shorter answer
+// rather than a refused request.
+const FALLBACK_MAX_OUTPUT = 8192;
+
+/**
+ * The model's own output ceiling, from the upstream's `/v1/models/{id}`.
+ *
+ * `max_tokens` there is the OUTPUT cap; `max_input_tokens` is the context
+ * window. Reading the wrong one would ask for an output the size of the window.
+ */
+async function outputLimitFor(t: UpstreamTarget, model: string): Promise<number> {
+  const key = `${t.url}|${model}`;
+  const known = outputLimits.get(key);
+  if (known !== undefined) return known;
+  const limit = await new Promise<number>((resolve) => {
+    const settle = (n: number) => resolve(n);
+    const req = open(t, `/v1/models/${encodeURIComponent(model)}`, 'GET', null, (upstreamRes) => {
+      if ((upstreamRes.statusCode ?? 502) >= 400) { upstreamRes.resume(); settle(FALLBACK_MAX_OUTPUT); return; }
+      void collect(upstreamRes).then((raw) => {
+        const parsed = safeJson(raw) as { max_tokens?: unknown } | null;
+        settle(typeof parsed?.max_tokens === 'number' && parsed.max_tokens > 0
+          ? parsed.max_tokens
+          : FALLBACK_MAX_OUTPUT);
+      }).catch(() => settle(FALLBACK_MAX_OUTPUT));
+    }, () => settle(FALLBACK_MAX_OUTPUT));
+    // A capability lookup must never hold up somebody's prompt.
+    req.setTimeout(5000, () => { req.destroy(); settle(FALLBACK_MAX_OUTPUT); });
+    req.end();
+  });
+  outputLimits.set(key, limit);
+  return limit;
+}
+
+/** Dropped when a connection changes, so a re-pointed upstream is re-asked. */
+export function forgetOutputLimits(): void { outputLimits.clear(); }
+
 async function chat(args: HandleArgs): Promise<Result> {
   const { req, res, target, shape, started } = args;
   const body = await readBody(req, config.maxBodyBytes);
@@ -492,7 +547,7 @@ async function chat(args: HandleArgs): Promise<Result> {
   neutral.stream = wantsStream;
 
   const outbound = target.api === 'anthropic'
-    ? ollamaToAnthropicRequest(neutral)
+    ? ollamaToAnthropicRequest(neutral, await outputLimitFor(target, model))
     : ollamaToOpenaiRequest(neutral);
   const payload = JSON.stringify(outbound);
 

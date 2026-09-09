@@ -369,7 +369,16 @@ export function anthropicTakesSampling(model: string): boolean {
 }
 
 /** The whole `/v1/messages` body for one Ollama chat request. */
-export function ollamaToAnthropicRequest(body: Block, defaultMaxTokens = 4096): Block {
+// `defaultMaxTokens` is what a client gets when it did not ask for a ceiling,
+// and the caller is expected to pass the model's OWN maximum — see
+// `outputLimitFor` in chatUpstream.ts. The default here is a conservative
+// fallback for callers that cannot look one up (the tests, mainly): every
+// current Anthropic model accepts at least this much, so being wrong costs a
+// shorter answer rather than a 400.
+//
+// It was 4096, which silently truncated every long answer for every client
+// that did not know to send `num_predict`.
+export function ollamaToAnthropicRequest(body: Block, defaultMaxTokens = 8192): Block {
   const o: Block = body.options ?? {};
   const { system, messages } = ollamaToAnthropicMessages(
     Array.isArray(body.messages) && body.messages.length
