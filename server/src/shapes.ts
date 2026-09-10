@@ -364,6 +364,15 @@ export function ollamaToAnthropicTools(tools: unknown): Block[] | undefined {
  * control over how varied the answer is, while sending it to a model that
  * refuses it costs the answer.
  */
+/**
+ * Effort levels the Messages API accepts.
+ *
+ * Deliberately not a passthrough of whatever Ollama's `think` held: an unknown
+ * value is a 400 there, so anything outside this set is dropped and the API's
+ * own default (`high`) applies.
+ */
+const ANTHROPIC_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
 export function anthropicTakesSampling(model: string): boolean {
   return /^claude-(3|opus-4-[0-6]|sonnet-4|haiku-4)/i.test(str(model));
 }
@@ -400,8 +409,27 @@ export function ollamaToAnthropicRequest(body: Block, defaultMaxTokens = 8192): 
     // without it is refused rather than defaulted.
     max_tokens: Number.isFinite(o.num_predict) && o.num_predict > 0 ? Number(o.num_predict) : defaultMaxTokens,
     ...(tools ? { tools } : {}),
-    // Anthropic's reasoning parameter carries a type, not a boolean.
-    ...(body.think && body.think !== false ? { thinking: { type: 'adaptive' } } : {}),
+    // Anthropic's reasoning parameter carries a type, not a boolean — and
+    // two details of it are the difference between working and silently not.
+    //
+    // **`display` defaults to `omitted`.** That is a silent change from Opus
+    // 4.6, and without asking for `summarized` the thinking blocks still
+    // arrive, still bill, and carry EMPTY TEXT. `anthropicToOllamaMessage`
+    // below collects those blocks into Ollama's `thinking` field, so a client
+    // that asked perch for reasoning would get an empty string and no error —
+    // the request succeeds and the feature quietly does not work.
+    //
+    // **`budget_tokens` is a 400** on the current models; depth is
+    // `output_config.effort`. Ollama's `think` already carries a level on the
+    // models that expose one, so that level is passed on rather than dropped.
+    // An unrecognised value is left off: `high` is this API's own default, and
+    // inventing a level would be worse than saying nothing.
+    ...(body.think && body.think !== false
+      ? {
+        thinking: { type: 'adaptive', display: 'summarized' },
+        ...(ANTHROPIC_EFFORTS.has(String(body.think)) ? { output_config: { effort: String(body.think) } } : {}),
+      }
+      : {}),
     ...(sampling && o.temperature !== undefined ? { temperature: Number(o.temperature) } : {}),
     ...(sampling && o.top_p !== undefined ? { top_p: Number(o.top_p) } : {}),
     ...(sampling && o.top_k !== undefined ? { top_k: Number(o.top_k) } : {}),

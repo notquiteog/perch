@@ -227,6 +227,33 @@ test('max_tokens is always sent, because the Messages API refuses a request with
   assert.equal(both.max_tokens, 77);
 });
 
+test('reasoning asks to be shown, or it arrives empty and nobody is told', () => {
+  // `display` defaults to `omitted` on the current models — a silent change
+  // from Opus 4.6. Without `summarized` the thinking blocks still arrive and
+  // still bill, carrying empty text, and anthropicToOllamaMessage then hands a
+  // client an empty `thinking` field with a 200 beside it. perch exists to
+  // translate reasoning between shapes, so this is the whole feature failing
+  // without an error anywhere.
+  const on = ollamaToAnthropicRequest({ model: 'claude-opus-5', messages: [], think: true });
+  assert.deepEqual(on.thinking, { type: 'adaptive', display: 'summarized' });
+
+  // A level rides along as effort, because `budget_tokens` is a 400 here.
+  const level = ollamaToAnthropicRequest({ model: 'claude-opus-5', messages: [], think: 'low' });
+  assert.deepEqual(level.output_config, { effort: 'low' });
+
+  // Anything outside the accepted set is dropped rather than forwarded: an
+  // unknown effort is itself a 400, and this API's own default is `high`.
+  const nonsense = ollamaToAnthropicRequest({ model: 'claude-opus-5', messages: [], think: 'exhaustive' });
+  assert.equal(nonsense.output_config, undefined);
+  assert.deepEqual(nonsense.thinking, { type: 'adaptive', display: 'summarized' });
+
+  // Off stays off, and is expressed by absence — `{ type: 'disabled' }` is
+  // refused outright on the models that always think.
+  const off = ollamaToAnthropicRequest({ model: 'claude-opus-5', messages: [], think: false });
+  assert.equal(off.thinking, undefined);
+  assert.equal(off.output_config, undefined);
+});
+
 test('temperature is withheld from the models that answer 400 to it', () => {
   // The trap for an adapter written from older documentation: temperature,
   // top_p and top_k were removed on the current generation, and sending one
