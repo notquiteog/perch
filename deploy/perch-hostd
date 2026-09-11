@@ -67,6 +67,29 @@ have() { command -v "$1" >/dev/null 2>&1; }
 valid_id() { [[ ${1-} =~ ^[a-z0-9][a-z0-9-]{0,35}$ ]]; }
 unit_for() { printf 'perch-tunnel-%s.service' "$1"; }
 
+# One of this project's compose services, by name.
+#
+# Literal rather than read out of the compose files, for the same reason the
+# action list is: this is the side with root, and a service name goes to
+# podman-compose as an argument. The console keeps its own copy of this list in
+# server/src/containers.ts, and a test there asserts the two agree — but this
+# is the one that decides, because it is the one that cannot be talked into
+# anything by the container.
+valid_service() {
+  case "${1-}" in
+    perch|ollama|whisper|comfy|kokoro) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Whether a service's image is built here or pulled from a registry, which is
+# what "rebuild" has to mean for it. perch is the only one with a Containerfile;
+# for the rest the equivalent is fetching the tag again. Getting this backwards
+# is a rebuild that reports success and changes nothing: `build` on a service
+# with no build section is a no-op, and `pull` on a locally built image cannot
+# find it.
+built_here() { [ "${1-}" = perch ]; }
+
 compose() {
   # Mirrors bin/perch so both take the same overlays into account — which
   # means sourcing .env and exporting COMPOSE_FILE, not just passing
@@ -350,8 +373,29 @@ write_status() {
 run_action() {
   local action="$1" arg="${2-}"
   case "$action" in
-    containers.start)    compose up -d ;;
-    containers.stop)     compose down ;;
+    # Every containers.* action below takes an optional service name: with one
+    # it acts on that container, without one on the whole stack. An
+    # unrecognised name is refused rather than quietly treated as "no name",
+    # because those two differ by the entire machine — a mistyped stop would
+    # otherwise take everything down and report success.
+    containers.start)
+      case "$arg" in
+        ''|all) compose up -d ;;
+        *)      valid_service "$arg" || { echo "unknown service: $arg"; return 2; }
+                compose up -d "$arg" ;;
+      esac ;;
+    # `down` for the whole stack and `stop` for one container, which are not
+    # the same operation: down removes what it stops, so the next start has to
+    # create the container again — and creating one is what picks up a changed
+    # .env. Stopping and starting a single service would then apply settings
+    # that a restart deliberately does not, which is the sort of difference
+    # nobody finds until it matters.
+    containers.stop)
+      case "$arg" in
+        ''|all) compose down ;;
+        *)      valid_service "$arg" || { echo "unknown service: $arg"; return 2; }
+                compose stop "$arg" ;;
+      esac ;;
     # A restart is a restart: the same container, started again. It does not
     # re-read .env — compose fixes a container's environment when it *creates*
     # it — so nothing that applies a setting may ask for this. Four of the six
@@ -361,9 +405,9 @@ run_action() {
     # for containers.recreate now, and this does what its name says.
     containers.restart)
       case "$arg" in
-        ''|all)      compose restart ;;
-        perch|ollama|whisper|comfy|kokoro) compose restart "$arg" ;;
-        *)           echo "unknown service: $arg"; return 2 ;;
+        ''|all) compose restart ;;
+        *)      valid_service "$arg" || { echo "unknown service: $arg"; return 2; }
+                compose restart "$arg" ;;
       esac ;;
     # Both a resource limit and a tuning value are fixed when a container is
     # created, so applying either is a recreate — a restart would leave the
@@ -371,11 +415,32 @@ run_action() {
     # setting to fail.
     containers.recreate)
       case "$arg" in
-        perch|ollama|whisper|comfy|kokoro) compose up -d --force-recreate "$arg" ;;
-        ''|all)      compose up -d --force-recreate ;;
-        *)           echo "unknown service: $arg"; return 2 ;;
+        ''|all) compose up -d --force-recreate ;;
+        *)      valid_service "$arg" || { echo "unknown service: $arg"; return 2; }
+                compose up -d --force-recreate "$arg" ;;
       esac ;;
-    containers.pull)     compose pull ;;
+    containers.pull)
+      case "$arg" in
+        ''|all) compose pull ;;
+        *)      valid_service "$arg" || { echo "unknown service: $arg"; return 2; }
+                compose pull "$arg" ;;
+      esac ;;
+    # Fetch the image again, then put the container on it. Two steps, because
+    # neither half is an update on its own: podman-compose decides whether to
+    # replace a container from a hash of its *configuration*, and a new image
+    # under the same tag changes none of that — so a pull alone leaves the old
+    # container running while every line of output says it worked. That is the
+    # failure bin/perch's `refresh` exists to catch. A new image nothing runs
+    # is the same non-event from the other end.
+    #
+    # One named service only. Rebuilding everything is `./bin/perch update`,
+    # which also updates the source the perch image is built from; doing half
+    # of that from the console would be an update that looks complete and is
+    # not.
+    containers.rebuild)
+      valid_service "$arg" || { echo "name a container to rebuild"; return 2; }
+      if built_here "$arg"; then compose build "$arg"; else compose pull "$arg"; fi || return $?
+      compose up -d --force-recreate "$arg" ;;
     boot.enable)         systemctl enable perch.service 2>&1 ;;
     boot.disable)        systemctl disable perch.service 2>&1 ;;
     tunnel.start|tunnel.stop|tunnel.restart|tunnel.enable|tunnel.disable|tunnel.logs)

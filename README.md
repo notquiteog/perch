@@ -102,9 +102,9 @@ shows what a running container actually has beside what has been asked for.
   gets its own account over there, its own key and its own service here, so
   removing one leaves the others alone. Setup per connection is: a key, one
   command to run on that box, and one line pasted back.
-- **System** — start, stop and restart the containers, set how much memory and
-  how many cores each may have, turn on starting at boot, tune Ollama's memory
-  settings, read logs.
+- **System** — start, stop, restart or rebuild each container on its own or all
+  of them together, set how much memory and how many cores each may have, turn
+  on starting at boot, tune Ollama's memory settings, read logs.
 - **Activity** — what came through the endpoints, so that when a client says
   the model is unreachable you can tell whether the request arrived at all.
 - **Settings** — issue and revoke tokens, set a console password, choose

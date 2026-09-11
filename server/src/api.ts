@@ -555,22 +555,40 @@ export function buildApi(): Router {
 
   // ---------- containers, boot, logs ----------
 
+  /**
+   * Start, stop, restart or rebuild — the whole stack, or one container.
+   *
+   * `service` names a compose service; leaving it out acts on everything.
+   * Which is why an unrecognised name is a 404 rather than a fallback to the
+   * everything case: those two outcomes differ by the entire machine, and a
+   * mistyped stop that took the whole stack down while reporting success is
+   * not a mistake anybody would connect to the typo. deploy/perch-hostd
+   * refuses it a second time for the same reason.
+   *
+   * Rebuild is the exception that requires one. Rebuilding everything is
+   * `./bin/perch update`, which also updates the source the perch image is
+   * built from — offering half of that here would be an update that looks
+   * complete and is not.
+   */
   r.post('/api/containers/:action', async (ctx) => {
     requireConsole(ctx);
     const a = ctx.params.action!;
     const map: Record<string, HostAction> = {
       start: 'containers.start', stop: 'containers.stop',
       restart: 'containers.restart', pull: 'containers.pull',
+      rebuild: 'containers.rebuild',
     };
     const action = map[a];
     if (!action) throw notFound('no such action');
     const body = await readJson<{ service?: string }>(ctx.req).catch(() => ({} as { service?: string }));
-    // A named container has to be one perch runs; anything else is refused
-    // here rather than handed to the helper to refuse.
-    const service = body.service && containerDef(body.service) ? body.service : '';
-    // Pulling images and starting containers are minutes-long jobs on a slow
-    // line, so they get a long leash.
-    sendJson(ctx.res, 200, await hostAction(action, service, 15 * 60_000));
+    const named = String(body.service ?? '').trim();
+    if (named && !containerDef(named)) throw notFound(`perch does not run a container called ${named}`);
+    if (!named && action === 'containers.rebuild') {
+      throw badRequest('Name the container to rebuild. Rebuilding everything is ./bin/perch update, which updates the source as well.');
+    }
+    // Pulling images, building them and starting containers are minutes-long
+    // jobs on a slow line, so they get a long leash.
+    sendJson(ctx.res, 200, await hostAction(action, named, 15 * 60_000));
   });
 
   // ---------- how big each container may be ----------

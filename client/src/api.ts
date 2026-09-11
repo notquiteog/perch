@@ -68,10 +68,12 @@ export interface MediaOverview {
   at: string;
 }
 
-/** One container, and how big it is allowed to be. */
+/** One container: what it is, how it is doing, and how big it may be. */
 export interface ContainerSize {
   id: string; label: string; service: ServiceId | null; enabled: boolean;
   memKey: string; cpuKey: string; defaultMem: string; floorBytes: number; note: string;
+  /** Built here from the Containerfile rather than pulled, which only perch is. */
+  built: boolean;
   /** What .env asks for, as compose passed it through. */
   configuredMem: string | null; configuredCpus: string | null;
   /** Whether perch was told the configured value at all, or is showing the default. */
@@ -79,6 +81,8 @@ export interface ContainerSize {
   /** What the running container was actually created with. */
   effectiveMemBytes: number | null; effectiveCpus: number | null;
   running: boolean; status: string | null;
+  /** What podman calls it — `perch_comfy_1`, not `comfy`. Null if it is not there. */
+  name: string | null; startedAt: string | null;
 }
 
 export interface VoiceStatus {
@@ -194,6 +198,7 @@ export interface TokenRecord {
 
 /** The compose services perch runs, which are what a restart or a log names. */
 export type ContainerName = 'perch' | 'ollama' | 'whisper' | 'comfy' | 'kokoro';
+export type ContainerAction = 'start' | 'stop' | 'restart' | 'pull' | 'rebuild';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -287,7 +292,11 @@ export const api = {
   }>(`/api/connections/${id}`, { method: 'DELETE' }),
   forgetConnection: (id: string) => request<{ ok: true }>(`/api/connections/${id}/forget`, { method: 'POST' }),
 
-  containerAction: (action: 'start' | 'stop' | 'restart' | 'pull', service?: ContainerName) =>
+  // With a service it acts on that one container; without, on the whole
+  // stack. `rebuild` is the exception and needs one — it fetches that image
+  // again and recreates the container onto it, which for perch means building
+  // from the Containerfile and for everything else re-pulling the tag.
+  containerAction: (action: ContainerAction, service?: ContainerName) =>
     request<{ ok: boolean; output: string }>(`/api/containers/${action}`, { method: 'POST', body: JSON.stringify({ service }) }),
   boot: (state: 'enable' | 'disable') => request<{ ok: boolean; output: string }>(`/api/boot/${state}`, { method: 'POST' }),
   logs: (service: ContainerName | 'tunnel') => request<{ ok: boolean; output: string }>(`/api/logs/${service}`),

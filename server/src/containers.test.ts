@@ -24,7 +24,7 @@ process.env.PERCH_STATE_DIR = stateDir;
 fs.mkdirSync(path.join(stateDir, 'host'), { recursive: true });
 
 /** Stand in for the host helper's telemetry: what podman says is running. */
-function publishHostStatus(containers: Array<{ name: string; status: string; memLimitBytes: number | null; cpus: number | null }>): void {
+function publishHostStatus(containers: Array<{ name: string; status: string; startedAt?: string; memLimitBytes: number | null; cpus: number | null }>): void {
   fs.writeFileSync(path.join(stateDir, 'host', 'status.json'), JSON.stringify({
     at: new Date().toISOString(),
     containers: containers.map((c) => ({ startedAt: '', ...c })),
@@ -103,6 +103,27 @@ test('a container reports what it was given, not what was asked for', () => {
   assert.equal(perch.effectiveCpus, null, 'no CPU limit is not the same as a limit of zero');
 });
 
+// The Containers card offers start, stop, restart and rebuild per row, which
+// it can only do for a container it can name — and it has to offer Start for
+// one that is not running, which is exactly the case the host's own list of
+// running containers does not contain.
+test('a container carries the name podman knows it by, and when it started', () => {
+  publishHostStatus([
+    { name: 'perch_comfy_1', status: 'Up 10 minutes', startedAt: '2026-09-09T12:00:00Z', memLimitBytes: null, cpus: null },
+  ]);
+  const rows = c.containerSizes();
+  const comfy = rows.find((r) => r.id === 'comfy')!;
+  assert.equal(comfy.name, 'perch_comfy_1', 'the row has to say which container it acts on');
+  assert.equal(comfy.startedAt, '2026-09-09T12:00:00Z');
+
+  // Not running, and still a row: this is the one somebody came here to
+  // start, and it is absent from what the host reports.
+  const whisper = rows.find((r) => r.id === 'whisper')!;
+  assert.equal(whisper.running, false);
+  assert.equal(whisper.name, null);
+  assert.equal(whisper.startedAt, null, 'an empty start time is not a time');
+});
+
 test('a container nothing has passed a size for says so rather than guessing', () => {
   publishHostStatus([]);
   const comfy = c.containerSizes().find((r) => r.id === 'comfy')!;
@@ -175,6 +196,64 @@ test('the host helper will write every key the console offers', () => {
   const accepted = new Set(body.slice(0, body.indexOf('\n}')).match(/[A-Z][A-Z0-9_]{2,}/g) ?? []);
   for (const key of Object.keys(c.TUNING_KEYS)) {
     assert.ok(accepted.has(key), `${key} is offered by the console but not accepted by deploy/perch-hostd`);
+  }
+});
+
+// Acting on one container means naming it, and the name goes to the host
+// helper. The helper keeps its own list because it is the side with root, so
+// the two lists can drift — and a container the console offers a Stop button
+// for and the helper refuses by name is a button that does nothing, reported
+// as "unknown service".
+test('the host helper accepts every container the console can name', () => {
+  const helper = fs.readFileSync(new URL('../../deploy/perch-hostd', import.meta.url), 'utf8');
+  const body = helper.slice(helper.indexOf('valid_service()'));
+  const accepted = body.slice(0, body.indexOf('\n}'));
+  for (const def of c.CONTAINERS) {
+    assert.match(accepted, new RegExp(`\\b${def.id}\\b`), `${def.id} is offered by the console but not accepted by deploy/perch-hostd`);
+  }
+});
+
+// Rebuild is two different commands wearing one name, and each is silent on
+// the wrong container: `build` on a service with no build section does
+// nothing and succeeds, and `pull` cannot find a locally built image. Getting
+// this backwards is therefore not an error anybody sees — it is a rebuild
+// that reports success and changes nothing.
+test('the console, the helper and the compose files agree on which image is built', () => {
+  const root = new URL('../../', import.meta.url);
+  const built = new Set<string>();
+  for (const file of fs.readdirSync(root).filter((n) => /^compose(\..+)?\.yml$/.test(n))) {
+    let service: string | null = null;
+    for (const line of fs.readFileSync(new URL(file, root), 'utf8').split('\n')) {
+      if (!line.trim() || line.trim().startsWith('#')) continue;
+      // Top level (services:, volumes:) ends whichever service was open.
+      if (/^ {0,1}\S/.test(line)) { service = null; continue; }
+      const svc = /^ {2}([a-z][\w-]*):\s*$/.exec(line);
+      if (svc) { service = svc[1]!; continue; }
+      if (service && /^ {4}build:/.test(line)) built.add(service);
+    }
+  }
+  assert.ok(built.has('perch'), 'the premise has changed — nothing in compose is built any more');
+
+  for (const def of c.CONTAINERS) {
+    assert.equal(def.built, built.has(def.id), `${def.id}: compose ${built.has(def.id) ? 'builds' : 'pulls'} this image`);
+  }
+
+  const helper = fs.readFileSync(new URL('../../deploy/perch-hostd', import.meta.url), 'utf8');
+  const decides = helper.split('\n').find((l) => l.startsWith('built_here()')) ?? '';
+  const helperBuilds = new Set((decides.match(/=\s*([a-z][a-z0-9]*)/g) ?? []).map((m) => m.replace(/=\s*/, '')));
+  assert.deepEqual(helperBuilds, built, 'deploy/perch-hostd decides this for itself, and it disagrees');
+});
+
+// A console that sends an action the helper has no case for gets "refused:
+// ... is not an action perch-hostd performs", which reads like a bug in the
+// helper rather than a name that was never wired up.
+test('every container action the console can send is one the helper performs', () => {
+  const helper = fs.readFileSync(new URL('../../deploy/perch-hostd', import.meta.url), 'utf8');
+  const host = fs.readFileSync(new URL('../src/host.ts', import.meta.url), 'utf8');
+  const actions = [...new Set((host.match(/'containers\.[a-z]+'/g) ?? []).map((x) => x.slice(1, -1)))];
+  assert.ok(actions.length >= 6, 'the actions could not be read out of host.ts');
+  for (const action of actions) {
+    assert.ok(helper.includes(`\n    ${action})`), `${action} is a HostAction with no case in deploy/perch-hostd`);
   }
 });
 

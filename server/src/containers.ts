@@ -41,6 +41,17 @@ export interface ContainerDef {
    * halfway through loading a model.
    */
   floorBytes: number;
+  /**
+   * Whether the image is built here from the Containerfile or pulled from a
+   * registry, which is the whole of what "rebuild" means for this container.
+   * Only perch is built. It matters because the two commands are silent when
+   * used on the wrong one — `build` on a service with no build section does
+   * nothing and succeeds, and `pull` cannot find a locally built image — so
+   * getting it backwards is a rebuild that reports success and changes
+   * nothing. deploy/perch-hostd decides this for itself, for the same reason
+   * it keeps its own copy of every other list.
+   */
+  built: boolean;
   note: string;
 }
 
@@ -53,6 +64,7 @@ export const CONTAINERS: ContainerDef[] = [
     cpuKey: 'PERCH_CPUS',
     defaultMem: '256m',
     floorBytes: 128e6,
+    built: true,
     note: 'The console and the endpoints. It streams bodies through without holding them, so it stays small whatever is passing through it — 256 MB is generous.',
   },
   {
@@ -63,6 +75,7 @@ export const CONTAINERS: ContainerDef[] = [
     cpuKey: 'OLLAMA_CPUS',
     defaultMem: '0',
     floorBytes: 2e9,
+    built: false,
     note: 'The language model. On a GPU box the weights live in VRAM, which no memory limit here touches; on a CPU box they live in this limit, so it has to be larger than the model.',
   },
   {
@@ -73,6 +86,7 @@ export const CONTAINERS: ContainerDef[] = [
     cpuKey: 'WHISPER_CPUS',
     defaultMem: '2g',
     floorBytes: 512e6,
+    built: false,
     note: 'Transcription. Small unless you run a large model on the CPU, where the weights are in system memory and this is what holds them.',
   },
   {
@@ -83,6 +97,7 @@ export const CONTAINERS: ContainerDef[] = [
     cpuKey: 'COMFY_CPUS',
     defaultMem: '24g',
     floorBytes: 8e9,
+    built: false,
     note: 'Video, images and music — every diffusion model perch runs is a graph in here. The hungriest container by a distance: it decodes whole clips in memory and offloads model parts back to the host when the card is full, so a tight limit here shows up as an out-of-memory kill mid-render.',
   },
   {
@@ -93,6 +108,7 @@ export const CONTAINERS: ContainerDef[] = [
     cpuKey: 'KOKORO_CPUS',
     defaultMem: '4g',
     floorBytes: 1e9,
+    built: false,
     note: 'Speech synthesis. An 82M-parameter model and the runtime around it; the runtime is most of this.',
   },
 ];
@@ -243,6 +259,7 @@ export interface ContainerSize {
   cpuKey: string;
   defaultMem: string;
   floorBytes: number;
+  built: boolean;
   note: string;
   /** What .env says, as compose passed it through to this container. */
   configuredMem: string | null;
@@ -258,6 +275,13 @@ export interface ContainerSize {
   effectiveCpus: number | null;
   running: boolean;
   status: string | null;
+  /**
+   * What podman calls it, which is not the service name — `perch_comfy_1`
+   * rather than `comfy`. Null when nothing is there to name: a container that
+   * has never been created, or a helper that is not answering.
+   */
+  name: string | null;
+  startedAt: string | null;
 }
 
 /** The value compose passed through, or null for "no limit". */
@@ -301,7 +325,7 @@ export function containerNameMatches(name: string, id: string): boolean {
   return parts.slice(1).includes(id);
 }
 
-function containerRow(id: string): { name: string; status: string; memLimitBytes?: number | null; cpus?: number | null } | undefined {
+function containerRow(id: string): { name: string; status: string; startedAt: string; memLimitBytes?: number | null; cpus?: number | null } | undefined {
   const { status } = readHostStatus();
   return status?.containers?.find((c) => containerNameMatches(c.name, id));
 }
@@ -320,6 +344,7 @@ export function containerSizes(): ContainerSize[] {
       cpuKey: def.cpuKey,
       defaultMem: def.defaultMem,
       floorBytes: floorFor(def),
+      built: def.built,
       note: def.note,
       configuredMem: envValue(def.memKey),
       configuredCpus: envValue(def.cpuKey),
@@ -328,6 +353,8 @@ export function containerSizes(): ContainerSize[] {
       effectiveCpus: row?.cpus ?? null,
       running: Boolean(row && row.status.toLowerCase().startsWith('up')),
       status: row?.status ?? null,
+      name: row?.name ?? null,
+      startedAt: row?.startedAt || null,
     };
   });
 }

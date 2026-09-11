@@ -74,11 +74,19 @@ export function readHostStatus(): { status: HostStatus | null; present: boolean;
 }
 
 export type HostAction =
+  // Each of these takes a compose service name, or an empty argument for the
+  // whole stack — except rebuild, which insists on one.
   | 'containers.start' | 'containers.stop' | 'containers.restart' | 'containers.pull'
   // Recreate, not restart: resource limits are fixed when a container is
   // created, so a restart would leave a changed limit sitting in .env doing
   // nothing.
   | 'containers.recreate'
+  // Fetch this container's image again — built here for perch, pulled from a
+  // registry for the rest — and recreate the container onto it. A pull on its
+  // own is not an update: podman-compose replaces a container based on its
+  // configuration, which a new image under the same tag does not change, so
+  // the old one keeps running and every line of output says it worked.
+  | 'containers.rebuild'
   | 'boot.enable' | 'boot.disable'
   | 'tunnel.start' | 'tunnel.stop' | 'tunnel.restart' | 'tunnel.enable' | 'tunnel.disable'
   | 'tunnel.logs' | 'tunnel.keygen' | 'tunnel.configure' | 'tunnel.remove'

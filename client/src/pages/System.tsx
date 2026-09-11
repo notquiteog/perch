@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, relative, type Overview, type TuningKey } from '../api';
+import {
+  ApiError, api, relative,
+  type ContainerAction, type ContainerName, type ContainerSize, type Overview, type TuningKey,
+} from '../api';
 import { Card, Notice, Spinner, Tag, Toggle } from '../components/ui';
 import ContainerSizes from './ContainerSizes';
 
@@ -59,6 +62,63 @@ const OLLAMA_KNOBS: Knob[] = [
   },
 ];
 
+/**
+ * What stops when this container does.
+ *
+ * Every one of these actions interrupts something somebody may be in the
+ * middle of, and the console is the only thing in a position to say what. A
+ * confirmation that reads "are you sure?" teaches people to click through it;
+ * one that names what is about to break is read.
+ */
+const INTERRUPTS: Record<string, string> = {
+  perch: 'this console and the model endpoint it serves',
+  ollama: 'the model endpoint and anything generating an answer right now',
+  whisper: 'dictation',
+  comfy: 'image and video generation',
+  kokoro: 'speech',
+};
+
+function whatStops(c: ContainerSize): string {
+  return INTERRUPTS[c.id] ?? c.label;
+}
+
+/**
+ * The sentence shown before a disruptive action, or null where there is
+ * nothing to warn about. Starting something that is not running costs nothing
+ * and is not worth a dialog.
+ */
+function confirmation(c: ContainerSize, action: ContainerAction): string | null {
+  // Anything done to perch takes away the container serving this page, and
+  // stop is the one with no way back from here: nothing on a page that is
+  // gone can start it again.
+  const andThePage = c.id === 'perch'
+    ? action === 'stop'
+      ? ' This page will stop loading, and starting perch again means a terminal on the machine: ./bin/perch up.'
+      : ' This page will fail to load for a few seconds and then come back.'
+    : '';
+  switch (action) {
+    case 'stop':
+      return `Stopping ${c.label} takes down ${whatStops(c)}.${andThePage} Carry on?`;
+    case 'restart':
+      return `Restarting ${c.label} interrupts ${whatStops(c)} until it is back.${andThePage} Carry on?`;
+    case 'rebuild':
+      return `${c.built ? 'Building' : 'Pulling'} ${c.label}’s image again and recreating the container on it. `
+        + `That interrupts ${whatStops(c)}, and on a slow line the image alone can take several minutes.${andThePage} Carry on?`;
+    default:
+      return null;
+  }
+}
+
+function done(c: ContainerSize, action: ContainerAction): string {
+  switch (action) {
+    case 'start': return `${c.label} started.`;
+    case 'stop': return `${c.label} stopped.`;
+    case 'restart': return `${c.label} restarted.`;
+    case 'rebuild': return `${c.label}’s image was ${c.built ? 'built' : 'pulled'} again and the container recreated on it.`;
+    default: return 'Done.';
+  }
+}
+
 export default function System() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -66,8 +126,22 @@ export default function System() {
   const [logs, setLogs] = useState<{ service: string; text: string } | null>(null);
   const [knobs, setKnobs] = useState<Record<string, string>>({});
   const [tuning, setTuning] = useState<TuningKey[]>([]);
+  // Every container perch runs, whether or not podman has one for it — which
+  // is the difference that matters here. The host status only lists what
+  // exists, and a container that has been stopped is exactly the one somebody
+  // has come to this page to start.
+  const [containers, setContainers] = useState<ContainerSize[]>([]);
+  const [totalMemBytes, setTotalMemBytes] = useState(0);
 
   const refresh = useCallback(async () => { setOverview(await api.overview()); }, []);
+
+  const refreshContainers = useCallback(async () => {
+    try {
+      const r = await api.containers();
+      setContainers(r.containers);
+      setTotalMemBytes(r.totalMemBytes);
+    } catch { /* the banner above already says when the console is unreachable */ }
+  }, []);
 
   // Not on the five-second poll with the rest: reading these means the host
   // helper asking podman what two containers were created with, and the
@@ -78,10 +152,11 @@ export default function System() {
 
   useEffect(() => {
     void refresh();
+    void refreshContainers();
     void loadTuning();
-    const t = setInterval(() => { void refresh(); }, 5000);
+    const t = setInterval(() => { void refresh(); void refreshContainers(); }, 5000);
     return () => clearInterval(t);
-  }, [refresh, loadTuning]);
+  }, [refresh, refreshContainers, loadTuning]);
 
   // Show what each knob is set to rather than an empty box. A blank field
   // beside a greyed-out placeholder reads as "not set", when in fact every one
@@ -101,12 +176,50 @@ export default function System() {
     try {
       const r = await fn();
       await refresh();
+      await refreshContainers();
       await loadTuning();
       setMessage({ tone: r.ok ? 'good' : 'bad', text: r.ok ? (ok ?? 'Done.') : (r.output.trim().split('\n').slice(-4).join('\n') || 'That did not work.') });
     } catch (e) {
       setMessage({ tone: 'bad', text: (e as Error).message });
     } finally {
       setBusy(null);
+    }
+  };
+
+  /**
+   * One action, on one container.
+   *
+   * Not `run` above, for two reasons: the confirmation has to name what this
+   * particular container is about to take down, and a request that acts on
+   * perch is answered by the container it is recreating — so the answer never
+   * arrives, and a dropped connection there is the action working rather than
+   * failing.
+   */
+  const act = async (c: ContainerSize, action: ContainerAction): Promise<void> => {
+    const ask = confirmation(c, action);
+    if (ask && !confirm(ask)) return;
+    setBusy(`${c.id}:${action}`);
+    setMessage(null);
+    try {
+      const r = await api.containerAction(action, c.id as ContainerName);
+      setMessage({
+        tone: r.ok ? 'good' : 'bad',
+        text: r.ok ? done(c, action) : (r.output.trim().split('\n').slice(-4).join('\n') || 'That did not work.'),
+      });
+    } catch (e) {
+      // An ApiError is the console answering with a refusal, which is a real
+      // failure. Anything else on perch is the connection going away with the
+      // container, which is what was asked for — reporting that as an error
+      // would send somebody to fix a machine that is busy doing as it was told.
+      if (c.id === 'perch' && !(e instanceof ApiError)) {
+        setMessage({ tone: 'info', text: 'perch is doing that now, which takes this console with it. Reload the page in a few seconds.' });
+      } else {
+        setMessage({ tone: 'bad', text: (e as Error).message });
+      }
+    } finally {
+      setBusy(null);
+      await refresh().catch(() => { /* perch may be the thing that just went away */ });
+      await refreshContainers();
     }
   };
 
@@ -129,9 +242,8 @@ export default function System() {
   if (!overview) return <div className="row"><Spinner /> <span className="mono">loading…</span></div>;
 
   const hostUp = overview.hostPresent && !overview.hostStale;
-  const containers = overview.host?.containers ?? [];
   const bootOn = overview.host?.boot.enabled === 'enabled';
-  const anyRunning = containers.some((c) => c.status.toLowerCase().startsWith('up'));
+  const anyRunning = containers.some((c) => c.running);
 
   return (
     <>
@@ -150,18 +262,71 @@ export default function System() {
         </Notice>
       )}
 
-      <Card title="Containers" sub="Everything perch runs, by podman: the console, Ollama, and whichever optional services are switched on.">
-        {containers.length === 0 ? (
-          <p className="sub">Nothing reported. Either they are not running, or the helper cannot see them.</p>
+      <Card
+        title="Containers"
+        sub="Everything perch runs, by podman: the console, Ollama, and whichever optional services are switched on. Each row acts on that container alone; the buttons underneath act on all of them."
+      >
+        {!hostUp ? (
+          // Every row would say "not running", including the one serving this
+          // page. A table of confident wrong answers is worse than no table.
+          <p className="sub">
+            What podman is running is a question only the host can be asked, and it is not
+            answering — so there is nothing to show here rather than a list of containers all
+            claiming to be stopped.
+          </p>
+        ) : containers.length === 0 ? (
+          <p className="sub">Nothing reported yet.</p>
         ) : (
           <table>
-            <thead><tr><th>Container</th><th>State</th><th className="right">Started</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Container</th><th>State</th><th className="right">Started</th><th />
+              </tr>
+            </thead>
             <tbody>
               {containers.map((c) => (
-                <tr key={c.name}>
-                  <td className="mono">{c.name}</td>
-                  <td>{c.status.toLowerCase().startsWith('up') ? <Tag tone="good">{c.status}</Tag> : <Tag tone="bad">{c.status}</Tag>}</td>
-                  <td className="right mono">{c.startedAt ? relative(c.startedAt) : '—'}</td>
+                <tr key={c.id} style={{ opacity: c.enabled ? 1 : 0.5 }}>
+                  <td>
+                    <div className="mono">{c.name ?? c.id}</div>
+                    <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>
+                      {c.label}
+                      {!c.enabled && ' · not switched on'}
+                    </div>
+                  </td>
+                  <td>
+                    {/* No status at all is a container podman has never been
+                        asked to create, which is a different thing from one
+                        that is stopped — and it is why Start is offered. */}
+                    {c.running ? <Tag tone="good">{c.status}</Tag>
+                      : c.status ? <Tag tone="bad">{c.status}</Tag>
+                        : <Tag>not created</Tag>}
+                  </td>
+                  <td className="right mono">{c.running && c.startedAt ? relative(c.startedAt) : '—'}</td>
+                  <td className="right">
+                    <div className="row end" style={{ gap: 6 }}>
+                      {c.running ? (
+                        <>
+                          <button className="sm" disabled={!hostUp || !c.enabled || busy !== null}
+                            onClick={() => void act(c, 'restart')}>
+                            {busy === `${c.id}:restart` ? <Spinner /> : 'Restart'}
+                          </button>
+                          <button className="sm danger" disabled={!hostUp || !c.enabled || busy !== null}
+                            onClick={() => void act(c, 'stop')}>
+                            {busy === `${c.id}:stop` ? <Spinner /> : 'Stop'}
+                          </button>
+                        </>
+                      ) : (
+                        <button className="sm" disabled={!hostUp || !c.enabled || busy !== null}
+                          onClick={() => void act(c, 'start')}>
+                          {busy === `${c.id}:start` ? <Spinner /> : 'Start'}
+                        </button>
+                      )}
+                      <button className="sm" disabled={!hostUp || !c.enabled || busy !== null}
+                        onClick={() => void act(c, 'rebuild')}>
+                        {busy === `${c.id}:rebuild` ? <Spinner /> : 'Rebuild'}
+                      </button>
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -171,11 +336,11 @@ export default function System() {
         <div className="row" style={{ marginTop: 14 }}>
           <button className="primary" disabled={!hostUp || busy !== null}
             onClick={() => void run('start', () => api.containerAction('start'), 'Containers started.')}>
-            {busy === 'start' ? <Spinner /> : 'Start'}
+            {busy === 'start' ? <Spinner /> : 'Start all'}
           </button>
           <button disabled={!hostUp || busy !== null || !anyRunning}
             onClick={() => void run('restart', () => api.containerAction('restart'), 'Containers restarted.')}>
-            {busy === 'restart' ? <Spinner /> : 'Restart'}
+            {busy === 'restart' ? <Spinner /> : 'Restart all'}
           </button>
           <button className="danger" disabled={!hostUp || busy !== null || !anyRunning}
             onClick={() => {
@@ -183,7 +348,7 @@ export default function System() {
                 void run('stop', () => api.containerAction('stop'), 'Containers stopped.');
               }
             }}>
-            {busy === 'stop' ? <Spinner /> : 'Stop'}
+            {busy === 'stop' ? <Spinner /> : 'Stop all'}
           </button>
           <button disabled={!hostUp || busy !== null}
             onClick={() => void run('pull', () => api.containerAction('pull'), 'Images pulled. Restart to run them.')}>
@@ -191,12 +356,19 @@ export default function System() {
           </button>
         </div>
         <p className="sub" style={{ marginTop: 10, marginBottom: 0 }}>
-          Stopping perch stops this console too — it is served by the same container, so the page
-          will go blank until you start it again from a terminal.
+          <strong>Rebuild</strong> fetches that container&rsquo;s image again — built here from the
+          Containerfile for perch, pulled from its registry for the rest — and recreates the
+          container on it. Both halves are needed: podman decides whether to replace a container
+          from its configuration, which a new image under the same tag does not change, so a pull
+          on its own leaves the old container running and reports success.
+          {' '}
+          <strong>Stop</strong> on perch stops this console with it — it is served by the same
+          container, so the page will go blank until you start it again with{' '}
+          <span className="mono">./bin/perch up</span> from a terminal on the machine.
         </p>
       </Card>
 
-      <ContainerSizes hostUp={hostUp} />
+      <ContainerSizes hostUp={hostUp} rows={containers} totalMemBytes={totalMemBytes} refresh={refreshContainers} />
 
       <Card title="At boot">
         <Toggle

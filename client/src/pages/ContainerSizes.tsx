@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { api, human, type ContainerSize } from '../api';
 import { Card, Notice, Spinner, Tag } from '../components/ui';
 
@@ -32,26 +32,21 @@ function memBytes(value: string | null | undefined): number | null {
 const shownMem = (c: ContainerSize): string => c.configuredMem ?? c.defaultMem;
 const shownCpus = (c: ContainerSize): string => c.configuredCpus ?? '0';
 
-export default function ContainerSizes({ hostUp }: { hostUp: boolean }) {
-  const [rows, setRows] = useState<ContainerSize[]>([]);
-  const [totalMemBytes, setTotalMemBytes] = useState(0);
+/**
+ * The rows come from the System page rather than from a fetch here, because
+ * the Containers card above is drawn from the same answer — two polls of one
+ * endpoint would only give the two tables a way to disagree with each other
+ * about which containers are running.
+ */
+export default function ContainerSizes({ hostUp, rows, totalMemBytes, refresh }: {
+  hostUp: boolean;
+  rows: ContainerSize[];
+  totalMemBytes: number;
+  refresh: () => Promise<void>;
+}) {
   const [edit, setEdit] = useState<Record<string, { mem: string; cpus: string }>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: 'good' | 'bad' | 'info'; text: string } | null>(null);
-
-  const refresh = useCallback(async () => {
-    try {
-      const r = await api.containers();
-      setRows(r.containers);
-      setTotalMemBytes(r.totalMemBytes);
-    } catch { /* the page above already says when the console is unreachable */ }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-    const t = setInterval(() => { void refresh(); }, 10_000);
-    return () => clearInterval(t);
-  }, [refresh]);
 
   const save = async (c: ContainerSize, apply: boolean): Promise<void> => {
     const pending = edit[c.id] ?? { mem: shownMem(c), cpus: shownCpus(c) };
@@ -63,7 +58,6 @@ export default function ContainerSizes({ hostUp }: { hostUp: boolean }) {
     setMessage(null);
     try {
       const r = await api.setContainerSize(c.id, { mem: pending.mem, cpus: pending.cpus, apply });
-      setRows(r.containers);
       if (!r.ok) setMessage({ tone: 'bad', text: r.set.find((x) => !x.ok)?.output ?? 'the console could not write the new size' });
       else if (r.applied && !r.applied.ok) setMessage({ tone: 'bad', text: `Written, but the container did not come back: ${r.applied.output.trim().split('\n').slice(-3).join('\n')}` });
       else if (apply) setMessage({ tone: 'good', text: `${c.label} was recreated at its new size.` });
